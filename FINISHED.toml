@@ -1,0 +1,17 @@
+# FINISHED — completed-work archive for this project.
+#
+# Append-only, newest first (see CLAUDE.md -> documentation map). Tasks land
+# here when `scripts/todo.sh done <id>` moves them out of TODO.toml.
+
+schema_version = 1
+
+[meta]
+title = "Finished"
+kind = "finished"
+purpose = "The archive of completed work for this project."
+documentation_map = "CLAUDE.md"
+order = "newest first"
+
+[meta.rules]
+finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, append-only."
+growth = "This file only grows; nothing is removed from it."
