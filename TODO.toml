@@ -21,34 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "download-files-in-parallel-under-a-byte-budget"
-title = "Download files in parallel under a byte budget"
-description = """
-Downloads are strictly sequential today: apply_page awaits apply_entry per entry in a loop (src/reconcile/apply.rs:186) with no spawn/join/buffer_unordered anywhere in the apply path. Measured live at ~2.0 MiB/s and 28 files/min, which is one HTTPS stream's throughput plus a full round-trip of latency before each file's first byte -- not the link's capacity.
-
-Bound BYTES in flight, not file count. A plain file-count semaphore is the wrong knob: eight 1 GB files at once thrashes the disk and stalls every small file behind them, while eight 4 KB files leaves the link idle. Instead give each download a cost equal to its size and admit against a byte budget (~64 MB to start). list_folder already returns 'size' on every file entry, so the cost is known up front -- no guessing.
-
-  - a hundred files totaling 1 MB: all hundred admitted at once, a rounding error against the budget
-  - one 1 GB file: admitted alone, occupying the budget by itself, which is fine since a single big stream can already saturate the link
-
-Pair the budget with a floor and a ceiling on file count: a minimum concurrency (2-4) so one huge file does not serialize everything behind it forever, and a maximum (~16) so ten thousand 1 KB files do not open ten thousand sockets. Clamp each file's cost to the whole budget so an oversized file counts as the full budget rather than being unschedulable.
-
-Two existing invariants collide with out-of-order completion and are the real work here:
-
-  1. Checkpoint ordering (commit 290d540). 'Apply before advance' currently holds trivially because entries complete in order. With parallel completion a page's cursor may only advance once EVERY entry in that page has landed, or a crash resumes past a file that never finished. The interim per-file state saves already leave the cursor alone, so this is survivable -- but a page's slowest file then gates the whole page's advance.
-
-  2. Path-level races. A page can hold a delete and a create for the same path, or a folder tombstone whose handler removes children another task is concurrently writing. Shard by path (hash the path to a lane so same-path operations stay sequential) and keep deletes and folder tombstones on a serial track outside the parallel pool.
-
-Level is scope: investigate the apply path and the cursor/checkpoint interaction first, then break out the atomic tasks. Follow-on idea, deliberately NOT part of this item: parallel ranged chunks within a single large file, which the Range/rev:<rev> support from e18cc0e already lays the groundwork for."""
-status = "active"
-level = "scope"
-category = "feature"
-urgency = "normal"
-order = 40
-created = 2026-08-29
-tags = ["download", "performance"]
-
-[[task]]
 id = "fetch-one-large-file-as-parallel-ranged-chunks"
 title = "Fetch one large file as parallel ranged chunks"
 description = """
@@ -77,3 +49,154 @@ urgency = "normal"
 order = 50
 created = 2026-08-29
 tags = ["download", "performance"]
+
+[[task]]
+id = "split-apply-entry-into-decide-fetch-and-record-phases"
+title = "Split apply_entry into decide, fetch, and record phases"
+description = """
+Enabling refactor for [download-files-in-parallel-under-a-byte-budget]. No behaviour change, no concurrency yet -- this is the structural blocker that has to move first.
+
+apply_entry (src/reconcile/apply.rs:36) takes &mut SyncState and holds it across the await on download_to. An exclusive borrow held across the network call is what makes parallelism impossible: N concurrent downloads cannot each hold &mut on the same state.
+
+Split it into three phases so the borrow is only held either side of the network, never during it:
+
+  - decide: from &SyncState (shared) plus the local path, produce a plan for one entry -- AlreadyCurrent (is_current), Download, PreserveThenDownload (conflict::has_local_edit), Directory, or Delete. Pure enough to unit-test without a fake remote.
+  - fetch: execute the plan against &S. Needs nothing from the state, so it is the part that can later run N-at-a-time.
+  - record: take &mut SyncState and apply the outcome -- entry_for_local_file then state.insert, or forget_subtree then remove.
+
+Keep Applied as the return type so existing callers and the apply.rs test module are unaffected. apply_page still drives it strictly sequentially at this point; the only observable change should be none, and the existing 194 tests should pass untouched.
+
+The conflict check must stay in the decide phase with its preserve() in the fetch phase, in that order -- moving the has_local_edit read later would reintroduce the window that 1d943aa closed."""
+status = "active"
+level = "task"
+category = "refactor"
+urgency = "normal"
+order = 41
+created = 2026-08-29
+tags = ["download", "performance"]
+
+[[task]]
+id = "add-a-byte-budget-admission-controller"
+title = "Add a byte-budget admission controller"
+description = """
+A standalone, fully unit-testable piece of [download-files-in-parallel-under-a-byte-budget]. Build and test it in isolation first; wiring happens in a later task.
+
+Admit downloads against bytes in flight rather than a file count. RemoteFile already carries size (src/api/mod.rs, used throughout the apply tests), so every candidate cost is known before a byte is fetched -- no estimation.
+
+Semantics to implement and cover:
+
+  - a budget of N bytes in flight (start at 64 MB, see the config task for making it a knob)
+  - cost of a download is its size, so a hundred files totalling 1 MB all admit at once while one 1 GB file admits alone
+  - a floor on concurrency (2-4): admit at least this many regardless of budget, so one huge file does not serialise everything behind it forever
+  - a ceiling on concurrency (~16): never exceed this many in flight regardless of how small the files are, so ten thousand 1 KB files do not open ten thousand sockets
+  - clamp each cost to the whole budget, so a file larger than the budget counts as the full budget and is admitted alone rather than being permanently unschedulable
+
+The floor and the budget genuinely conflict (the floor admits past a full budget by design) and the resolution -- floor wins -- is the thing to pin with a test.
+
+A tokio Semaphore with weighted permits is the obvious backing, but note acquire_many takes a u32 permit count, so bytes need scaling to a unit (KiB, or a fixed number of budget slots) rather than being used raw. Keep this module free of any network or filesystem dependency so its tests are pure."""
+status = "active"
+level = "task"
+category = "feature"
+urgency = "normal"
+order = 42
+created = 2026-08-29
+tags = ["download", "performance"]
+
+[[task]]
+id = "partition-a-page-into-serial-and-parallel-tracks"
+title = "Partition a page into serial and parallel tracks"
+description = """
+The ordering-safety half of [download-files-in-parallel-under-a-byte-budget]. A pure function over a page of entries, unit-testable with no remote and no disk.
+
+Not every entry in a page may run concurrently. Split each page into:
+
+  - a SERIAL track, applied in listing order: tombstones (RemoteEntry::Deleted) and folder entries. apply_delete calls forget_subtree and remove_dir_all, which can race a concurrent write into that subtree -- a folder tombstone is the only notice that its children are gone, so it must not overlap anything touching those children.
+  - a PARALLEL track: file downloads, which are independent once same-path ordering is preserved.
+
+Same-path ordering: a page can contain more than one entry for one path (a create then a delete, or two revisions). Group by key_for(display_path) -- the existing case-folding key in src/state -- and keep each group sequential, so operations on one path never overlap even though different paths do.
+
+Deletes and downloads must also stay ordered RELATIVE to each other when they touch the same subtree, not just the same exact path. Simplest correct rule to start with: a tombstone acts as a barrier -- drain the parallel track before applying it, then resume. Refine later only if the barrier proves to be a real cost, which for a first listing (almost entirely files, few tombstones) it should not be.
+
+One thing that is NOT a blocker, contrary to the parent scope description: file-before-folder ordering is already safe, because download_to creates dest parent directories itself (src/api/download.rs:39-41). A file arriving before its folder entry works today and will keep working."""
+status = "active"
+level = "task"
+category = "feature"
+urgency = "normal"
+order = 43
+created = 2026-08-29
+tags = ["download", "performance"]
+
+[[task]]
+id = "run-the-parallel-track-under-the-byte-budget"
+title = "Run the parallel track under the byte budget"
+description = """
+The wiring step of [download-files-in-parallel-under-a-byte-budget]. Depends on the decide/fetch/record split, the budget controller, and the page partition all being in place.
+
+In apply_page (src/reconcile/mod.rs:182), drive the parallel track concurrently: for each admitted entry run the decide and fetch phases, then feed outcomes back to a single owner that runs record against &mut SyncState. Only the fetch phase overlaps; state mutation stays single-threaded, which is what the phase split buys.
+
+Concrete obstacles to expect:
+
+  - apply_page takes &mut self and reaches self.source, self.paths, and self.state. Split the borrow explicitly (&self.source, &self.paths, &mut self.state) or the borrow checker will reject holding the source across concurrent tasks while the state is mutable.
+  - RemoteSource methods return impl Future + Send and take &self, so sharing is fine, but concurrent use will likely require adding a Sync bound to S at the call site. Check that FakeRemote (src/reconcile/testing.rs) still satisfies it -- its interior mutability is behind a Mutex, so it should.
+  - Preserve the current error policy exactly: one failing entry is logged at warn and stepped over, the cursor still advances, and a later change re-delivers the path. A JoinError or a panicking task must not abort the page.
+  - Results must be recorded in a deterministic order even though they complete out of order, or two runs over the same page produce different state files. Feed outcomes back in listing order rather than completion order.
+
+Cover with a test that a page of N files issues N downloads with more than one in flight (FakeRemote can count concurrent calls with a high-water mark), and that the resulting state matches what the sequential path produced for the same page."""
+status = "active"
+level = "task"
+category = "feature"
+urgency = "normal"
+order = 44
+created = 2026-08-29
+tags = ["download", "performance"]
+
+[[task]]
+id = "rework-checkpointing-for-out-of-order-completion"
+title = "Rework checkpointing for out-of-order completion"
+description = """
+The durability half of [download-files-in-parallel-under-a-byte-budget], and the part most likely to corrupt state if it is got wrong. Must land WITH the parallel wiring, not after it.
+
+Today is_checkpoint(applied) (src/reconcile/mod.rs:55) counts a strictly increasing sequential tally, and set_cursor happens once the loop has walked every entry. Both assumptions break under concurrency:
+
+  - the counter no longer means a prefix. With out-of-order completion, "100 applied" can mean entries 1-99 and 140 landed, so a crash-and-resume that trusts it would skip 100-139. Interim saves are still safe (they only ever add entries that really are on disk, and they never touch the cursor) but the INTERVAL must be driven by completed count while the CURSOR must be driven by a full-page barrier.
+  - the cursor may only advance once EVERY entry in the page has finished. This is the rule from commit 290d540 and docs/architecture.md, and under parallelism it stops being free: a pages slowest file now gates the whole pages advance. That is the correct trade -- advancing early loses changes permanently, re-applying a page is harmless.
+
+So: keep interim saves on a completed-count interval, and gate set_cursor plus its save on the page barrier. Do not try to advance the cursor to a partial watermark; Dropbox cursors are opaque and cannot be positioned mid-page.
+
+Update the apply_page doc comment, which currently explains the ordering in terms of a sequential loop, and docs/architecture.md alongside it. Extend entries_are_checkpointed_within_a_long_page to a page that completes out of order, and add a case pinning that the cursor is NOT advanced when one entry in the page fails to complete."""
+status = "active"
+level = "task"
+category = "bug"
+urgency = "normal"
+order = 45
+created = 2026-08-29
+tags = ["download", "correctness"]
+
+[[task]]
+id = "make-download-concurrency-configurable-and-document-it"
+title = "Make download concurrency configurable and document it"
+description = """
+The closing task of [download-files-in-parallel-under-a-byte-budget]. A feature is not done until it is documented (CLAUDE.md), and hardcoded tuning constants for a network-bound loop age badly.
+
+Expose the budget controller knobs through the existing config path (config.example.toml plus the DBSYNC_ prefixed environment overrides, as DBSYNC_LOCAL_ROOT is done):
+
+  - the in-flight byte budget, default 64 MB
+  - the concurrency floor, default 2-4
+  - the concurrency ceiling, default 16
+
+A budget of zero or a ceiling below the floor must be rejected at config load with a clear error rather than deadlocking the pull at runtime.
+
+Documentation, per the hub-and-spoke map:
+
+  - README.md: what each knob does and when an operator would change it -- a slow link wants a smaller budget, a fast one with many small files wants a higher ceiling.
+  - docs/architecture.md: why the budget is denominated in bytes rather than files, and the two invariants parallelism has to respect (the page-barrier cursor advance, and the serial track for tombstones). This is the design decision that should not get re-litigated later.
+  - config.example.toml: the keys with their defaults.
+
+Finally, re-measure. The pre-change baseline is ~2.0 MiB/s and 28 files/min, measured live on 2026-08-29 over a 60s window (124.7 MB, 2144 to 2172 files). Record the after number so the change is justified by evidence rather than assumption."""
+status = "active"
+level = "task"
+category = "docs"
+urgency = "normal"
+order = 46
+created = 2026-08-29
+tags = ["download", "config"]
