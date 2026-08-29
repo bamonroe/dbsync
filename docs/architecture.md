@@ -65,7 +65,9 @@ implementation yet.
 | `src/error.rs` | Crate-wide `Error`/`Result` | done |
 | `src/notify/longpoll.rs` | The long-poll call: cursor in, outcome out | done |
 | `src/state/hash.rs` | Dropbox content hash (4 MiB SHA-256 tree) | done |
-| `src/state/mod.rs` | Local sync database; the only writer of sync state | stub |
+| `src/state/mod.rs` | Sync-state entry point; builds entries from local files | done |
+| `src/state/entry.rs` | Per-file record and its change-detection predicates | done |
+| `src/state/db.rs` | `SyncState` plus atomic load/save | done |
 | `src/auth/pkce.rs` | RFC 7636 verifier/challenge generation | done |
 | `src/auth/oauth.rs` | Authorize URL, code exchange, refresh | done |
 | `src/auth/loopback.rs` | One-shot loopback listener for the redirect | done |
@@ -102,6 +104,31 @@ Two safety properties worth keeping:
 - Access tokens are refreshed **five minutes before** their stated expiry, so a token cannot
   expire between the check and the request that uses it. `TokenProvider::force_refresh` exists
   for the 401 case, where a token was revoked ahead of schedule and the cache is untrustworthy.
+
+## Sync state
+
+The state is a single JSON document at `$XDG_DATA_HOME/dbsync/state.json`, holding the folder
+cursor plus one entry per file: `rev`, content hash, local mtime, size, and the display path.
+Rewriting it whole is the right trade at this size — one atomic replace is far easier to
+reason about than incremental updates that could half-apply.
+
+**Atomic save** means: write a temporary file, `fsync` it, `rename` over the target, then
+`fsync` the parent directory. The first sync makes the bytes durable; the last makes the
+rename itself durable. A crash therefore leaves either the complete old state or the complete
+new one, and a leftover `.tmp` is ignored on load.
+
+**Entries are keyed by lowercased path.** Dropbox treats paths case-insensitively, so
+`/Photos/Cat.jpg` and `/photos/cat.jpg` are one file; keying on the lowercase form stops a
+case change from being read as a second file. The original casing is preserved separately for
+display.
+
+**Change detection is two-tier.** `metadata_matches` compares size and mtime, which is cheap
+and lets a scan skip unchanged files without reading them. It is a pre-filter, not proof — an
+editor can rewrite a file to the same size within the same timestamp granularity — so when it
+reports a difference the reconciler hashes to find out what actually happened.
+
+A state file whose `version` is newer than this build understands is refused rather than
+misread.
 
 ## Container build
 

@@ -33,18 +33,6 @@ created = 2026-08-29
 tags = ["push"]
 
 [[task]]
-id = "implement-the-local-sync-state-database"
-title = "Implement the local sync state database"
-description = "The 'state' module: persist path -> (rev, Dropbox content hash, local mtime, size) plus the folder cursor, atomically, so a crash cannot leave state and disk disagreeing."
-status = "active"
-level = "task"
-category = "feature"
-urgency = "high"
-order = 50
-created = 2026-08-29
-tags = ["state"]
-
-[[task]]
 id = "implement-remote-to-local-application"
 title = "Implement remote-to-local application"
 description = "On a change signal, call /files/list_folder/continue, apply adds/edits/deletes to disk, and advance the cursor. Handle the 409 cursor-reset path by re-listing and reconciling."
