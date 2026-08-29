@@ -9,6 +9,7 @@
 //! for the client and its error mapping, one for the metadata shapes, and one
 //! per endpoint family.
 
+mod chunks;
 mod client;
 mod download;
 mod list_folder;

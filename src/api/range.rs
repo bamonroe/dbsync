@@ -32,9 +32,6 @@ impl ByteRange {
     ///
     /// A zero-length chunk has no valid HTTP spelling, so it is not one:
     /// callers planning chunks must not emit empty ranges.
-    // No caller until the chunk planner lands; the type is only half a type
-    // without it, and its verify behaviour is what the tests below pin down.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(super) fn bounded(start: u64, len: u64) -> Self {
         debug_assert!(len > 0, "a byte range must ask for at least one byte");
         Self {

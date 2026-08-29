@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "plan-a-file-s-chunk-layout-from-its-size"
+title = "Plan a file's chunk layout from its size"
+description = "A pure module that turns (size, config) into the list of byte ranges to fetch, with no network or disk in it -- the same shape as src/reconcile/budget.rs, and testable the same way. Fixed-size chunks, so chunk N's offset is implied by N and the progress map can be a bitmap rather than a stored list of extents. Below a threshold size it must yield exactly one whole-file range, so a 200 KB file keeps its single request instead of paying four round-trips. Cover: size zero, size below the threshold, size exactly one chunk, a size with a short final chunk, and a cap on chunks per file so a huge file does not produce thousands of ranges."
+status = "finished"
+level = "task"
+category = "feature"
+created = 2026-08-29
+completed = 2026-08-29
+tags = []
+
+[[task]]
 id = "thread-the-remote-file-size-down-into-download-to"
 title = "Thread the remote file size down into download_to"
 description = "Chunking cannot be planned without the total size, and download_to (src/api/download.rs:38) does not receive it. The caller already has it: apply.rs:138 holds the RemoteFile, whose size the byte budget in src/reconcile/budget.rs already spends. Add size to the DownloadSource trait method in src/reconcile/source.rs (both impls, plus the fake in src/reconcile/testing.rs) and pass it through. Pure plumbing, no behaviour change -- land it on its own so the chunking commit stays readable."
