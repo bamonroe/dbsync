@@ -15,8 +15,11 @@ services:
       - ./config.toml:/home/dbsync/config.toml:ro
       # The directory being synced. Must match `local_root` in config.toml.
       - ${DBSYNC_LOCAL_ROOT:-/data/storage/dbsync}:/data/storage/dbsync
-      # Credentials, kept out of the repo and out of the image.
-      - dbsync-auth:/home/dbsync/.local/share/dbsync
+      # Credentials and sync state, kept out of the repo and out of the image.
+      # A bind mount rather than a named volume so the host and the container
+      # share one store: `auth login` run on either side links both, and the
+      # cursor survives moving between them.
+      - ${DBSYNC_STATE_DIR:-${HOME}/.local/share/dbsync}:/home/dbsync/.local/share/dbsync
     restart: unless-stopped
 
 volumes:
