@@ -21,13 +21,29 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "resume-an-interrupted-download-with-a-range-request"
-title = "Resume an interrupted download with a Range request"
-description = "download_to deletes its partial file on error and re-fetches from byte zero next time. For a large file on a flaky link that can mean never finishing. Keep the partial and re-request with an HTTP Range header, validating the remote rev is unchanged before trusting the prefix."
+id = "download-files-in-parallel-under-a-byte-budget"
+title = "Download files in parallel under a byte budget"
+description = """
+Downloads are strictly sequential today: apply_page awaits apply_entry per entry in a loop (src/reconcile/apply.rs:186) with no spawn/join/buffer_unordered anywhere in the apply path. Measured live at ~2.0 MiB/s and 28 files/min, which is one HTTPS stream's throughput plus a full round-trip of latency before each file's first byte -- not the link's capacity.
+
+Bound BYTES in flight, not file count. A plain file-count semaphore is the wrong knob: eight 1 GB files at once thrashes the disk and stalls every small file behind them, while eight 4 KB files leaves the link idle. Instead give each download a cost equal to its size and admit against a byte budget (~64 MB to start). list_folder already returns 'size' on every file entry, so the cost is known up front -- no guessing.
+
+  - a hundred files totaling 1 MB: all hundred admitted at once, a rounding error against the budget
+  - one 1 GB file: admitted alone, occupying the budget by itself, which is fine since a single big stream can already saturate the link
+
+Pair the budget with a floor and a ceiling on file count: a minimum concurrency (2-4) so one huge file does not serialize everything behind it forever, and a maximum (~16) so ten thousand 1 KB files do not open ten thousand sockets. Clamp each file's cost to the whole budget so an oversized file counts as the full budget rather than being unschedulable.
+
+Two existing invariants collide with out-of-order completion and are the real work here:
+
+  1. Checkpoint ordering (commit 290d540). 'Apply before advance' currently holds trivially because entries complete in order. With parallel completion a page's cursor may only advance once EVERY entry in that page has landed, or a crash resumes past a file that never finished. The interim per-file state saves already leave the cursor alone, so this is survivable -- but a page's slowest file then gates the whole page's advance.
+
+  2. Path-level races. A page can hold a delete and a create for the same path, or a folder tombstone whose handler removes children another task is concurrently writing. Shard by path (hash the path to a lane so same-path operations stay sequential) and keep deletes and folder tombstones on a serial track outside the parallel pool.
+
+Level is scope: investigate the apply path and the cursor/checkpoint interaction first, then break out the atomic tasks. Follow-on idea, deliberately NOT part of this item: parallel ranged chunks within a single large file, which the Range/rev:<rev> support from e18cc0e already lays the groundwork for."""
 status = "active"
-level = "task"
+level = "scope"
 category = "feature"
-urgency = "low"
-order = 30
+urgency = "normal"
+order = 40
 created = 2026-08-29
-tags = ["sync"]
+tags = ["download", "performance"]

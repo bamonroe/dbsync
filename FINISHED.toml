@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "resume-an-interrupted-download-with-a-range-request"
+title = "Resume an interrupted download with a Range request"
+description = "download_to deletes its partial file on error and re-fetches from byte zero next time. For a large file on a flaky link that can mean never finishing. Keep the partial and re-request with an HTTP Range header, validating the remote rev is unchanged before trusting the prefix."
+status = "finished"
+level = "task"
+category = "feature"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["sync"]
+
+[[task]]
 id = "sweep-orphaned-dbsync-partial-files"
 title = "Sweep orphaned .dbsync-partial files"
 description = "download_to removes its partial file when a download errors, but a hard kill leaves it on disk forever. Nothing ever sweeps them, so they accumulate silently in the synced tree — invisible to sync (the watcher filters them via is_partial) but real bytes. Add a cleanup pass, most naturally at startup before the initial pull."
