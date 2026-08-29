@@ -117,10 +117,11 @@ Our own partial downloads and the state database are filtered out before anythin
 A download streams to a `.dbsync-partial` sibling of its destination and is renamed into place
 only once complete, so a torn file is never visible and the watcher never uploads one back.
 The sibling placement is deliberate: `rename` is atomic only within a filesystem, so staging
-somewhere central would silently become a copy and reopen that window. An errored download
-removes its own partial, but a hard kill does not, so `reconcile::sweep::partial_downloads`
-clears the strays at startup — before the pull, since from then on an in-flight partial and an
-abandoned one look identical.
+somewhere central would silently become a copy and reopen that window. Partials outlive a
+failed attempt on purpose, so the next one can resume (below), which means nothing deletes
+them at the point of failure: `reconcile::sweep::partial_downloads` clears the strays at
+startup — before the pull, since from then on an in-flight partial and an abandoned one look
+identical.
 
 An interrupted download **resumes** rather than restarting: the partial is kept, and the next
 attempt sends `Range: bytes=<have>-` for the rest. Two things make appending to a prefix safe,
