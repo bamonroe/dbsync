@@ -88,6 +88,16 @@ over preserved local bytes, mkdir, or delete. `fetch` performs it and reads no s
 either side of the download but never across it, which is the precondition for having more
 than one download in flight: concurrent fetches cannot each hold `&mut` on one state.
 
+How much may then be in flight is decided in **bytes, not files** (`src/reconcile/budget.rs`).
+A file count is the wrong unit — eight 1 KB files and eight 1 GB files are the same number and
+nothing like the same load — and the size comes with the listing, so no estimating is needed.
+Three limits interact: a byte budget (64 MB) bounds the total size in flight; a floor (4) is
+admitted regardless of it, so one enormous file cannot serialise the small files queued behind
+it; and a ceiling (16) caps the count however tiny the files are. Where the floor and the byte
+budget conflict, the floor wins and the ceiling beats both, and a file larger than the whole
+budget is charged the whole budget so it runs alone rather than never. The gate is written as a
+pure counter with no network or disk dependency; it is not yet wired into `apply_page`.
+
 Two consequences worth knowing. The conflict check belongs to `decide`, not to the download,
 because asking after the fetch would reopen the window that spurious conflicted copies came
 through. And because `record` runs only once `fetch` succeeded, a failed removal leaves the
@@ -230,6 +240,7 @@ implementation yet.
 | `src/reconcile/local.rs` | Pushing one local path: upload, delete, or decide it is unchanged | done |
 | `src/reconcile/apply.rs` | Applying one entry in three phases: decide, fetch, record | done |
 | `src/reconcile/conflict.rs` | Conflicted-copy naming, and detecting an unsent local edit | done |
+| `src/reconcile/budget.rs` | Byte-budget admission control for parallel downloads | not yet wired |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |
 | `src/watcher/debounce.rs` | Per-path quiet-period coalescing | done |
 | `src/daemon/mod.rs` | Building the components from config and the startup order | done |

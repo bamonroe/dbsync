@@ -22,6 +22,7 @@
 //!   state, so the watcher event it caused does not become an upload.
 
 mod apply;
+pub mod budget;
 mod conflict;
 mod local;
 mod paths;
@@ -32,6 +33,7 @@ pub mod sweep;
 pub(crate) mod testing;
 
 pub use apply::Applied;
+pub use budget::{Admission, Budget};
 pub use conflict::conflicted_path;
 pub use local::Pushed;
 pub use paths::PathMapper;

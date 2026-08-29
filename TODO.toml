@@ -51,33 +51,6 @@ created = 2026-08-29
 tags = ["download", "performance"]
 
 [[task]]
-id = "add-a-byte-budget-admission-controller"
-title = "Add a byte-budget admission controller"
-description = """
-A standalone, fully unit-testable piece of [download-files-in-parallel-under-a-byte-budget]. Build and test it in isolation first; wiring happens in a later task.
-
-Admit downloads against bytes in flight rather than a file count. RemoteFile already carries size (src/api/mod.rs, used throughout the apply tests), so every candidate cost is known before a byte is fetched -- no estimation.
-
-Semantics to implement and cover:
-
-  - a budget of N bytes in flight (start at 64 MB, see the config task for making it a knob)
-  - cost of a download is its size, so a hundred files totalling 1 MB all admit at once while one 1 GB file admits alone
-  - a floor on concurrency (2-4): admit at least this many regardless of budget, so one huge file does not serialise everything behind it forever
-  - a ceiling on concurrency (~16): never exceed this many in flight regardless of how small the files are, so ten thousand 1 KB files do not open ten thousand sockets
-  - clamp each cost to the whole budget, so a file larger than the budget counts as the full budget and is admitted alone rather than being permanently unschedulable
-
-The floor and the budget genuinely conflict (the floor admits past a full budget by design) and the resolution -- floor wins -- is the thing to pin with a test.
-
-A tokio Semaphore with weighted permits is the obvious backing, but note acquire_many takes a u32 permit count, so bytes need scaling to a unit (KiB, or a fixed number of budget slots) rather than being used raw. Keep this module free of any network or filesystem dependency so its tests are pure."""
-status = "active"
-level = "task"
-category = "feature"
-urgency = "normal"
-order = 42
-created = 2026-08-29
-tags = ["download", "performance"]
-
-[[task]]
 id = "partition-a-page-into-serial-and-parallel-tracks"
 title = "Partition a page into serial and parallel tracks"
 description = """
