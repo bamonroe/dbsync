@@ -51,31 +51,6 @@ created = 2026-08-29
 tags = ["download", "performance"]
 
 [[task]]
-id = "split-apply-entry-into-decide-fetch-and-record-phases"
-title = "Split apply_entry into decide, fetch, and record phases"
-description = """
-Enabling refactor for [download-files-in-parallel-under-a-byte-budget]. No behaviour change, no concurrency yet -- this is the structural blocker that has to move first.
-
-apply_entry (src/reconcile/apply.rs:36) takes &mut SyncState and holds it across the await on download_to. An exclusive borrow held across the network call is what makes parallelism impossible: N concurrent downloads cannot each hold &mut on the same state.
-
-Split it into three phases so the borrow is only held either side of the network, never during it:
-
-  - decide: from &SyncState (shared) plus the local path, produce a plan for one entry -- AlreadyCurrent (is_current), Download, PreserveThenDownload (conflict::has_local_edit), Directory, or Delete. Pure enough to unit-test without a fake remote.
-  - fetch: execute the plan against &S. Needs nothing from the state, so it is the part that can later run N-at-a-time.
-  - record: take &mut SyncState and apply the outcome -- entry_for_local_file then state.insert, or forget_subtree then remove.
-
-Keep Applied as the return type so existing callers and the apply.rs test module are unaffected. apply_page still drives it strictly sequentially at this point; the only observable change should be none, and the existing 194 tests should pass untouched.
-
-The conflict check must stay in the decide phase with its preserve() in the fetch phase, in that order -- moving the has_local_edit read later would reintroduce the window that 1d943aa closed."""
-status = "active"
-level = "task"
-category = "refactor"
-urgency = "normal"
-order = 41
-created = 2026-08-29
-tags = ["download", "performance"]
-
-[[task]]
 id = "add-a-byte-budget-admission-controller"
 title = "Add a byte-budget admission controller"
 description = """
