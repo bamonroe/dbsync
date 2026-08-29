@@ -51,30 +51,6 @@ created = 2026-08-29
 tags = ["download", "performance"]
 
 [[task]]
-id = "partition-a-page-into-serial-and-parallel-tracks"
-title = "Partition a page into serial and parallel tracks"
-description = """
-The ordering-safety half of [download-files-in-parallel-under-a-byte-budget]. A pure function over a page of entries, unit-testable with no remote and no disk.
-
-Not every entry in a page may run concurrently. Split each page into:
-
-  - a SERIAL track, applied in listing order: tombstones (RemoteEntry::Deleted) and folder entries. apply_delete calls forget_subtree and remove_dir_all, which can race a concurrent write into that subtree -- a folder tombstone is the only notice that its children are gone, so it must not overlap anything touching those children.
-  - a PARALLEL track: file downloads, which are independent once same-path ordering is preserved.
-
-Same-path ordering: a page can contain more than one entry for one path (a create then a delete, or two revisions). Group by key_for(display_path) -- the existing case-folding key in src/state -- and keep each group sequential, so operations on one path never overlap even though different paths do.
-
-Deletes and downloads must also stay ordered RELATIVE to each other when they touch the same subtree, not just the same exact path. Simplest correct rule to start with: a tombstone acts as a barrier -- drain the parallel track before applying it, then resume. Refine later only if the barrier proves to be a real cost, which for a first listing (almost entirely files, few tombstones) it should not be.
-
-One thing that is NOT a blocker, contrary to the parent scope description: file-before-folder ordering is already safe, because download_to creates dest parent directories itself (src/api/download.rs:39-41). A file arriving before its folder entry works today and will keep working."""
-status = "active"
-level = "task"
-category = "feature"
-urgency = "normal"
-order = 43
-created = 2026-08-29
-tags = ["download", "performance"]
-
-[[task]]
 id = "run-the-parallel-track-under-the-byte-budget"
 title = "Run the parallel track under the byte budget"
 description = """

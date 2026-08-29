@@ -88,6 +88,17 @@ over preserved local bytes, mkdir, or delete. `fetch` performs it and reads no s
 either side of the download but never across it, which is the precondition for having more
 than one download in flight: concurrent fetches cannot each hold `&mut` on one state.
 
+Not every entry may overlap, though, so a page is first **partitioned into steps**
+(`src/reconcile/schedule.rs`). File downloads are independent and go in a concurrent step;
+tombstones and folder entries are serial. A tombstone is a **barrier** — everything in flight
+drains before it is applied — because deleting a folder forgets and removes a whole subtree,
+and a folder tombstone is the only notice its children are gone, so there is no per-child
+event to order against. Entries for one path stay sequential within the concurrent step,
+grouped by the same case-folding key the state uses, so two revisions of one file never race.
+Folders are serial work but deliberately not barriers: a download creates its own parent
+directories, so a file may safely precede its folder entry, and making every folder a barrier
+would shred the parallelism of a first listing.
+
 How much may then be in flight is decided in **bytes, not files** (`src/reconcile/budget.rs`).
 A file count is the wrong unit — eight 1 KB files and eight 1 GB files are the same number and
 nothing like the same load — and the size comes with the listing, so no estimating is needed.
@@ -241,6 +252,7 @@ implementation yet.
 | `src/reconcile/apply.rs` | Applying one entry in three phases: decide, fetch, record | done |
 | `src/reconcile/conflict.rs` | Conflicted-copy naming, and detecting an unsent local edit | done |
 | `src/reconcile/budget.rs` | Byte-budget admission control for parallel downloads | not yet wired |
+| `src/reconcile/schedule.rs` | Splitting a page into serial and concurrent steps | not yet wired |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |
 | `src/watcher/debounce.rs` | Per-path quiet-period coalescing | done |
 | `src/daemon/mod.rs` | Building the components from config and the startup order | done |

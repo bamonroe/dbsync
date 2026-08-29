@@ -26,6 +26,7 @@ pub mod budget;
 mod conflict;
 mod local;
 mod paths;
+pub mod schedule;
 mod sink;
 mod source;
 pub mod sweep;
@@ -37,6 +38,7 @@ pub use budget::{Admission, Budget};
 pub use conflict::conflicted_path;
 pub use local::Pushed;
 pub use paths::PathMapper;
+pub use schedule::{Step, partition};
 pub use sink::RemoteSink;
 pub use source::RemoteSource;
 
