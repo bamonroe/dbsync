@@ -17,6 +17,34 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "make-download-concurrency-configurable-and-document-it"
+title = "Make download concurrency configurable and document it"
+description = """
+The closing task of [download-files-in-parallel-under-a-byte-budget]. A feature is not done until it is documented (CLAUDE.md), and hardcoded tuning constants for a network-bound loop age badly.
+
+Expose the budget controller knobs through the existing config path (config.example.toml plus the DBSYNC_ prefixed environment overrides, as DBSYNC_LOCAL_ROOT is done):
+
+  - the in-flight byte budget, default 64 MB
+  - the concurrency floor, default 2-4
+  - the concurrency ceiling, default 16
+
+A budget of zero or a ceiling below the floor must be rejected at config load with a clear error rather than deadlocking the pull at runtime.
+
+Documentation, per the hub-and-spoke map:
+
+  - README.md: what each knob does and when an operator would change it -- a slow link wants a smaller budget, a fast one with many small files wants a higher ceiling.
+  - docs/architecture.md: why the budget is denominated in bytes rather than files, and the two invariants parallelism has to respect (the page-barrier cursor advance, and the serial track for tombstones). This is the design decision that should not get re-litigated later.
+  - config.example.toml: the keys with their defaults.
+
+Finally, re-measure. The pre-change baseline is ~2.0 MiB/s and 28 files/min, measured live on 2026-08-29 over a 60s window (124.7 MB, 2144 to 2172 files). Record the after number so the change is justified by evidence rather than assumption."""
+status = "finished"
+level = "task"
+category = "docs"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["download", "config"]
+
+[[task]]
 id = "rework-checkpointing-for-out-of-order-completion"
 title = "Rework checkpointing for out-of-order completion"
 description = """
