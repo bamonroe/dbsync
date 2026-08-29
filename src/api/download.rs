@@ -8,6 +8,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use super::chunkmap::MAP_SUFFIX;
 use super::client::ApiClient;
 use super::range::ByteRange;
 use crate::error::{Error, Result};
@@ -164,7 +165,10 @@ fn sanitise_rev(rev: &str) -> String {
 pub fn is_partial(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(PARTIAL_SUFFIX))
+        .is_some_and(|name| {
+            name.ends_with(PARTIAL_SUFFIX)
+                || name.ends_with(&format!("{PARTIAL_SUFFIX}{MAP_SUFFIX}"))
+        })
 }
 
 #[cfg(test)]

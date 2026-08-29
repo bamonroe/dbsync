@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "record-chunk-progress-in-a-sidecar-bitmap-beside-the-partial"
-title = "Record chunk progress in a sidecar bitmap beside the partial"
-description = "Today a partial's progress IS its length (existing_len, src/api/download.rs:99), which cannot express 'chunks 0-3 and 5 landed, 4 did not'. Write chunks at their true offsets into a sparse partial and keep a sidecar bitmap file, one bit per fixed-size chunk, named off partial_path so the startup sweep in src/reconcile/sweep.rs clears it with the partial it belongs to. The sidecar header must carry the size and chunk size, and a mismatch against the expected values must be treated as an unusable map and restart from zero. Each landed chunk sets its bit and fsyncs the sidecar before it counts -- a crash may lose progress but must never claim a chunk that is not on disk. Test round-tripping the map, rejecting a mismatched header, and rejecting a truncated sidecar."
-status = "active"
-level = "task"
-category = "feature"
-urgency = "normal"
-order = 90
-created = 2026-08-29
-tags = []
-
-[[task]]
 id = "complete-a-chunked-download-on-every-chunk-present-never-on-length"
 title = "Complete a chunked download on 'every chunk present', never on length"
 description = "A sparse file reaches its full length the moment the LAST chunk lands, so the current 'length equals size' test would rename a hole-filled file into place -- silent corruption. The rename in download_to must be gated on every bit in the sidecar map being set, and the sidecar removed only after the rename succeeds. Add a test that writes the final chunk first and asserts nothing is renamed, and one that fills every chunk out of order and asserts the destination bytes are exactly right."

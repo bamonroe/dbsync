@@ -97,6 +97,11 @@ impl ChunkPlan {
         self.count == 1
     }
 
+    /// The total length of the file this plan covers.
+    pub(super) fn size(self) -> u64 {
+        self.size
+    }
+
     /// How many chunks this file is split into — the width of its bitmap.
     pub(super) fn count(self) -> u32 {
         self.count
