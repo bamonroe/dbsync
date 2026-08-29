@@ -21,31 +21,97 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "fetch-one-large-file-as-parallel-ranged-chunks"
-title = "Fetch one large file as parallel ranged chunks"
-description = """
-Parallelism ACROSS files does nothing for a single huge file: one 1 GB download is still one HTTPS stream at ~2 MiB/s no matter how large the byte budget is. This is the complementary half of [download-files-in-parallel-under-a-byte-budget] -- split one file into N byte ranges and fetch them concurrently into the same partial.
-
-Most of the groundwork already exists from e18cc0e:
-  - send_download / content_download_from already take resume_from and set the RANGE header, so issuing an arbitrary range is a parameter change rather than new transport code
-  - the resumed request already addresses 'rev:<rev>' instead of the display path, which is what makes concurrent chunks provably come from ONE revision. Without that, a remote edit mid-download would splice two revisions into a single file and the result would be silent corruption rather than a visible failure.
-  - partial_path already keys the partial file by sanitised rev, so a mid-download remote edit starts a fresh partial and the stale one is cleared by the startup sweep (src/reconcile/sweep.rs)
-
-The actual work is bookkeeping. Today a partial's progress IS its length: existing_len() stats the file and resumes from there. That single number cannot express 'ranges 0-3 and 5 landed, 4 did not', so concurrent chunks need a real record of which ranges have been written. Options to weigh during the investigation:
-
-  - a sidecar index file next to the partial, which must be updated durably as each chunk lands or a crash loses the map and forces a restart from zero
-  - fixed-size chunks so the map is a compact bitmap and chunk N's offset is implied rather than stored
-  - write chunks at their true offsets into a sparse preallocated file, so the file is correct by construction once every chunk is accounted for
-
-Whichever is chosen, the completion test must become 'every range present' rather than 'length equals size' -- a sparse file reaches full length as soon as the LAST chunk lands, so length alone would declare a half-downloaded file complete and rename a hole-filled file into place.
-
-Also decide: a size threshold below which chunking is pointless (a 200 KB file split four ways just pays four round-trips), how chunk concurrency composes with the outer byte budget so the two do not multiply into far more sockets than intended, and whether 416 / non-206 handling per chunk should fail the whole file or just retry that range.
-
-Level is scope: investigate src/api/download.rs and the partial-file representation, then break out the atomic tasks."""
+id = "ask-for-a-bounded-byte-range-not-just-an-open-ended-resume"
+title = "Ask for a bounded byte range, not just an open-ended resume"
+description = "send_download (src/api/client.rs:148) only ever emits 'bytes={offset}-'. Chunked fetching needs 'bytes={start}-{end}' as well. Replace the resume_from: Option<u64> parameter on send_download / content_download_from with a range type carrying a start and an optional inclusive end, so the existing open-ended resume stays expressible and a bounded chunk becomes a second case rather than a second code path. Verify the response is 206 and that its Content-Range covers exactly the range asked for -- a server answering 200 with the whole body would otherwise be written into one chunk's slot. Unit-test the header the range type renders for both shapes."
 status = "active"
-level = "scope"
+level = "task"
+category = "feature"
+urgency = "high"
+order = 60
+created = 2026-08-29
+tags = []
+
+[[task]]
+id = "thread-the-remote-file-size-down-into-download-to"
+title = "Thread the remote file size down into download_to"
+description = "Chunking cannot be planned without the total size, and download_to (src/api/download.rs:38) does not receive it. The caller already has it: apply.rs:138 holds the RemoteFile, whose size the byte budget in src/reconcile/budget.rs already spends. Add size to the DownloadSource trait method in src/reconcile/source.rs (both impls, plus the fake in src/reconcile/testing.rs) and pass it through. Pure plumbing, no behaviour change -- land it on its own so the chunking commit stays readable."
+status = "active"
+level = "task"
+category = "refactor"
+urgency = "high"
+order = 70
+created = 2026-08-29
+tags = []
+
+[[task]]
+id = "plan-a-file-s-chunk-layout-from-its-size"
+title = "Plan a file's chunk layout from its size"
+description = "A pure module that turns (size, config) into the list of byte ranges to fetch, with no network or disk in it -- the same shape as src/reconcile/budget.rs, and testable the same way. Fixed-size chunks, so chunk N's offset is implied by N and the progress map can be a bitmap rather than a stored list of extents. Below a threshold size it must yield exactly one whole-file range, so a 200 KB file keeps its single request instead of paying four round-trips. Cover: size zero, size below the threshold, size exactly one chunk, a size with a short final chunk, and a cap on chunks per file so a huge file does not produce thousands of ranges."
+status = "active"
+level = "task"
 category = "feature"
 urgency = "normal"
-order = 50
+order = 80
 created = 2026-08-29
-tags = ["download", "performance"]
+tags = []
+
+[[task]]
+id = "record-chunk-progress-in-a-sidecar-bitmap-beside-the-partial"
+title = "Record chunk progress in a sidecar bitmap beside the partial"
+description = "Today a partial's progress IS its length (existing_len, src/api/download.rs:99), which cannot express 'chunks 0-3 and 5 landed, 4 did not'. Write chunks at their true offsets into a sparse partial and keep a sidecar bitmap file, one bit per fixed-size chunk, named off partial_path so the startup sweep in src/reconcile/sweep.rs clears it with the partial it belongs to. The sidecar header must carry the size and chunk size, and a mismatch against the expected values must be treated as an unusable map and restart from zero. Each landed chunk sets its bit and fsyncs the sidecar before it counts -- a crash may lose progress but must never claim a chunk that is not on disk. Test round-tripping the map, rejecting a mismatched header, and rejecting a truncated sidecar."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "normal"
+order = 90
+created = 2026-08-29
+tags = []
+
+[[task]]
+id = "complete-a-chunked-download-on-every-chunk-present-never-on-length"
+title = "Complete a chunked download on 'every chunk present', never on length"
+description = "A sparse file reaches its full length the moment the LAST chunk lands, so the current 'length equals size' test would rename a hole-filled file into place -- silent corruption. The rename in download_to must be gated on every bit in the sidecar map being set, and the sidecar removed only after the rename succeeds. Add a test that writes the final chunk first and asserts nothing is renamed, and one that fills every chunk out of order and asserts the destination bytes are exactly right."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "high"
+order = 100
+created = 2026-08-29
+tags = []
+
+[[task]]
+id = "fetch-a-file-s-chunks-concurrently-without-multiplying-the-socket-count"
+title = "Fetch a file's chunks concurrently without multiplying the socket count"
+description = "Drive the planned ranges concurrently into the one partial, all addressing 'rev:<rev>' so every chunk provably comes from a single revision. Chunk concurrency must draw from the SAME admission in src/reconcile/budget.rs that bounds across-file parallelism, not a second independent pool, or the two limits multiply into far more sockets than either intends -- a file admitted for its whole size should be spending that admission on its own chunks. Decide and document how a chunk's share is accounted against the byte budget. Per-chunk failure retries just that range and leaves the other bits set; a 416 or a non-206 on a chunk invalidates the map and restarts the file rather than failing the sync."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "normal"
+order = 110
+created = 2026-08-29
+tags = []
+
+[[task]]
+id = "expose-the-chunking-threshold-and-per-file-chunk-concurrency-as-config"
+title = "Expose the chunking threshold and per-file chunk concurrency as config"
+description = "Follow the pattern src/config.rs already uses for min_concurrency / max_concurrency, including the environment-variable override at src/config.rs:163 and the validation at :201. Needs at minimum a minimum-size threshold below which a file is fetched whole, a chunk size, and a per-file chunk concurrency. Validate the same way the existing pair does (a zero chunk size, a threshold below the chunk size). Document every new key in README.md in the same commit."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "low"
+order = 120
+created = 2026-08-29
+tags = []
+
+[[task]]
+id = "document-ranged-chunked-downloads-in-the-architecture-doc"
+title = "Document ranged chunked downloads in the architecture doc"
+description = "docs/architecture.md owns how the data path works and records the load-bearing decisions, so the chunking design belongs there and nowhere else: why chunks address rev:<rev> rather than the display path, why progress moved from a file length to a sidecar bitmap, why completion is 'every chunk present', and how per-file chunk concurrency composes with the across-file byte budget instead of multiplying it. Link it from the download section rather than restating the config keys README.md owns."
+status = "active"
+level = "task"
+category = "docs"
+urgency = "low"
+order = 130
+created = 2026-08-29
+tags = []

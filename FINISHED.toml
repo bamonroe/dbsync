@@ -17,6 +17,35 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "fetch-one-large-file-as-parallel-ranged-chunks"
+title = "Fetch one large file as parallel ranged chunks"
+description = """
+Parallelism ACROSS files does nothing for a single huge file: one 1 GB download is still one HTTPS stream at ~2 MiB/s no matter how large the byte budget is. This is the complementary half of [download-files-in-parallel-under-a-byte-budget] -- split one file into N byte ranges and fetch them concurrently into the same partial.
+
+Most of the groundwork already exists from e18cc0e:
+  - send_download / content_download_from already take resume_from and set the RANGE header, so issuing an arbitrary range is a parameter change rather than new transport code
+  - the resumed request already addresses 'rev:<rev>' instead of the display path, which is what makes concurrent chunks provably come from ONE revision. Without that, a remote edit mid-download would splice two revisions into a single file and the result would be silent corruption rather than a visible failure.
+  - partial_path already keys the partial file by sanitised rev, so a mid-download remote edit starts a fresh partial and the stale one is cleared by the startup sweep (src/reconcile/sweep.rs)
+
+The actual work is bookkeeping. Today a partial's progress IS its length: existing_len() stats the file and resumes from there. That single number cannot express 'ranges 0-3 and 5 landed, 4 did not', so concurrent chunks need a real record of which ranges have been written. Options to weigh during the investigation:
+
+  - a sidecar index file next to the partial, which must be updated durably as each chunk lands or a crash loses the map and forces a restart from zero
+  - fixed-size chunks so the map is a compact bitmap and chunk N's offset is implied rather than stored
+  - write chunks at their true offsets into a sparse preallocated file, so the file is correct by construction once every chunk is accounted for
+
+Whichever is chosen, the completion test must become 'every range present' rather than 'length equals size' -- a sparse file reaches full length as soon as the LAST chunk lands, so length alone would declare a half-downloaded file complete and rename a hole-filled file into place.
+
+Also decide: a size threshold below which chunking is pointless (a 200 KB file split four ways just pays four round-trips), how chunk concurrency composes with the outer byte budget so the two do not multiply into far more sockets than intended, and whether 416 / non-206 handling per chunk should fail the whole file or just retry that range.
+
+Level is scope: investigate src/api/download.rs and the partial-file representation, then break out the atomic tasks."""
+status = "finished"
+level = "scope"
+category = "feature"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["download", "performance"]
+
+[[task]]
 id = "make-download-concurrency-configurable-and-document-it"
 title = "Make download concurrency configurable and document it"
 description = """
