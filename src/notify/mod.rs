@@ -13,6 +13,10 @@
 //! A `changes: true` response carries no file data. The reconciler must follow
 //! up with `/2/files/list_folder/continue` to learn what actually changed.
 
+mod backoff;
 mod longpoll;
+mod watch;
 
+pub use backoff::Backoff;
 pub use longpoll::{LongpollClient, LongpollOutcome};
+pub use watch::{CursorHandle, Longpoll, NotifyLoop, RemoteEvent, channel};

@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "implement-the-long-poll-notification-loop"
+title = "Implement the long-poll notification loop"
+description = "The 'notify' module. DONE: the LongpollClient call itself (separate unauthenticated client, backoff/timeout/changed outcomes, cursor-reset detection). REMAINING: the driving loop that holds a cursor, honours backoff, reconnects, and emits change signals to the reconciler."
+status = "finished"
+level = "task"
+category = "feature"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["push"]
+
+[[task]]
 id = "implement-the-local-sync-state-database"
 title = "Implement the local sync state database"
 description = "The 'state' module: persist path -> (rev, Dropbox content hash, local mtime, size) plus the folder cursor, atomically, so a crash cannot leave state and disk disagreeing."

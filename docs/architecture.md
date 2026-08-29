@@ -47,6 +47,24 @@ Two properties of the endpoint shape the design:
                   └──────────────── local direction ─────────────────┘
 ```
 
+### The notify loop's contract
+
+`notify::channel(poller, cursor)` returns three things: the loop itself, a `CursorHandle`,
+and a `RemoteEvent` receiver. The split keeps the loop ignorant of file data — it only ever
+nudges.
+
+- The loop emits `RemoteEvent::Changed` when Dropbox reports changes. The reconciler answers
+  by calling `/files/list_folder/continue` and publishing the resulting cursor back through
+  the `CursorHandle`; every poll re-reads the handle, so the next call uses it.
+- A `backoff` in a successful response is slept verbatim. A *failed* poll retries on a
+  capped exponential curve (1s doubling to 60s) that resets on the next success, so a
+  network outage never kills the daemon and never escalates past a one-minute retry.
+- `Error::CursorReset` becomes `RemoteEvent::CursorReset`, after which the loop **idles**
+  rather than re-polling a cursor Dropbox has already rejected. It resumes the moment the
+  reconciler publishes a fresh one (see the cursor-reset rule below).
+- Dropping the event receiver is the shutdown signal: the loop returns at its next
+  iteration.
+
 Both directions funnel through a single **reconciler** so that a change is never applied in
 both directions at once; the reconciler owns the local↔remote state database and is the only
 component allowed to write it.
@@ -64,6 +82,8 @@ implementation yet.
 | `src/config.rs` | Load and validate `config.toml` | done |
 | `src/error.rs` | Crate-wide `Error`/`Result` | done |
 | `src/notify/longpoll.rs` | The long-poll call: cursor in, outcome out | done |
+| `src/notify/backoff.rs` | Capped exponential retry curve for failed polls | done |
+| `src/notify/watch.rs` | The driving loop: holds the cursor, reconnects, emits `RemoteEvent` | done |
 | `src/state/hash.rs` | Dropbox content hash (4 MiB SHA-256 tree) | done |
 | `src/state/mod.rs` | Sync-state entry point; builds entries from local files | done |
 | `src/state/entry.rs` | Per-file record and its change-detection predicates | done |
