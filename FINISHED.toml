@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "implement-remote-to-local-application"
+title = "Implement remote-to-local application"
+description = "On a change signal, call /files/list_folder/continue, apply adds/edits/deletes to disk, and advance the cursor. Handle the 409 cursor-reset path by re-listing and reconciling."
+status = "finished"
+level = "task"
+category = "feature"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["sync"]
+
+[[task]]
 id = "implement-the-long-poll-notification-loop"
 title = "Implement the long-poll notification loop"
 description = "The 'notify' module. DONE: the LongpollClient call itself (separate unauthenticated client, backoff/timeout/changed outcomes, cursor-reset detection). REMAINING: the driving loop that holds a cursor, honours backoff, reconnects, and emits change signals to the reconciler."

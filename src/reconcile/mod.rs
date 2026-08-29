@@ -1,0 +1,404 @@
+//! The reconciler: the single point where changes are applied.
+//!
+//! Both directions funnel through here so a path is never written from the
+//! remote and local sides at once, and so conflicts produce a
+//! `filename (conflicted copy).ext` rather than destroying either version.
+//!
+//! This module currently implements the **remote-to-local** direction. A
+//! [`crate::notify::RemoteEvent::Changed`] signal turns into a
+//! [`RemoteApplier::pull`]: drain `list_folder/continue`, apply every entry to
+//! disk, and persist the new cursor. The local direction is still a stub — see
+//! `TODO.toml`.
+//!
+//! Two rules from `docs/architecture.md` are enforced here:
+//!
+//! - **The cursor is only advanced after the page it describes has been
+//!   applied**, so a crash re-delivers work rather than skipping it.
+//! - **A cursor reset is routine**: drop the cursor, re-list, and reconcile
+//!   against local state instead of re-downloading the world.
+
+mod apply;
+mod paths;
+mod source;
+#[cfg(test)]
+mod testing;
+
+pub use apply::Applied;
+pub use paths::PathMapper;
+pub use source::RemoteSource;
+
+use std::collections::HashSet;
+
+use crate::api::ListFolderPage;
+use crate::error::{Error, Result};
+use crate::state::{StateDb, SyncState, key_for};
+
+/// What one pull did. Reported so the daemon can log it and the tests can pin
+/// the re-list path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pull {
+    /// How many entries were applied.
+    pub applied: usize,
+    /// Whether the cursor had to be rebuilt from a full listing.
+    pub resynced: bool,
+}
+
+/// Applies remote changes to the local directory.
+pub struct RemoteApplier<S> {
+    source: S,
+    paths: PathMapper,
+    db: StateDb,
+    state: SyncState,
+}
+
+impl<S: RemoteSource> RemoteApplier<S> {
+    pub fn new(source: S, paths: PathMapper, db: StateDb, state: SyncState) -> Self {
+        Self {
+            source,
+            paths,
+            db,
+            state,
+        }
+    }
+
+    /// The cursor to long-poll on, once there is one.
+    pub fn cursor(&self) -> Option<&str> {
+        self.state.cursor()
+    }
+
+    pub fn state(&self) -> &SyncState {
+        &self.state
+    }
+
+    /// Apply everything the remote has for us.
+    ///
+    /// With no cursor — a first run — this is a full listing. A cursor Dropbox
+    /// has invalidated is handled the same way, transparently.
+    pub async fn pull(&mut self) -> Result<Pull> {
+        let Some(cursor) = self.state.cursor().map(str::to_string) else {
+            return self.resync().await;
+        };
+        match self.pull_from(cursor).await {
+            Err(Error::CursorReset) => {
+                tracing::info!("cursor reset by Dropbox; re-listing");
+                self.state.clear_cursor();
+                self.resync().await
+            }
+            other => other,
+        }
+    }
+
+    /// Drain `list_folder/continue` from `cursor` until there is no more.
+    async fn pull_from(&mut self, cursor: String) -> Result<Pull> {
+        let mut pull = Pull::default();
+        let mut cursor = cursor;
+        loop {
+            let page = self.source.list_folder_continue(&cursor).await?;
+            let has_more = page.has_more;
+            cursor = page.cursor.clone();
+            pull.applied += self.apply_page(page).await?;
+            if !has_more {
+                return Ok(pull);
+            }
+        }
+    }
+
+    /// Rebuild our position from a full listing, reconciling against state.
+    ///
+    /// Local files the listing does not mention were deleted remotely while we
+    /// were not watching, so they go too. Existing entries are kept, which is
+    /// what makes this a reconcile rather than a re-download: a file whose
+    /// `rev` still matches is skipped.
+    async fn resync(&mut self) -> Result<Pull> {
+        let mut pull = Pull {
+            resynced: true,
+            ..Pull::default()
+        };
+        let mut seen = HashSet::new();
+        let mut page = self.source.list_folder(self.paths.remote_root()).await?;
+        loop {
+            let has_more = page.has_more;
+            for entry in &page.entries {
+                seen.insert(key_for(entry.display_path()));
+            }
+            pull.applied += self.apply_page(page).await?;
+            if !has_more {
+                break;
+            }
+            let cursor = self.state.cursor().unwrap_or_default().to_string();
+            page = self.source.list_folder_continue(&cursor).await?;
+        }
+        pull.applied += self.drop_vanished(&seen).await?;
+        self.db.save(&self.state)?;
+        Ok(pull)
+    }
+
+    /// Apply a page, then advance and persist the cursor.
+    ///
+    /// The order matters: advancing first would let a crash mid-page lose
+    /// changes permanently, whereas re-applying a page is harmless.
+    async fn apply_page(&mut self, page: ListFolderPage) -> Result<usize> {
+        let mut applied = 0;
+        for entry in &page.entries {
+            match apply::apply_entry(&self.source, &self.paths, &mut self.state, entry).await {
+                Ok(_) => applied += 1,
+                // One bad path must not stall the whole stream; the cursor
+                // still advances, and a later change re-delivers the path.
+                Err(error) => {
+                    tracing::warn!(path = entry.display_path(), %error, "could not apply entry")
+                }
+            }
+        }
+        self.state.set_cursor(page.cursor);
+        self.db.save(&self.state)?;
+        Ok(applied)
+    }
+
+    /// Delete local files that the full listing did not mention.
+    async fn drop_vanished(&mut self, seen: &HashSet<String>) -> Result<usize> {
+        let vanished: Vec<String> = self
+            .state
+            .entries()
+            .map(|entry| entry.display_path.clone())
+            .filter(|path| !seen.contains(&key_for(path)))
+            .collect();
+        let mut removed = 0;
+        for path in vanished {
+            let local = self.paths.to_local(&path)?;
+            match tokio::fs::remove_file(&local).await {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            self.state.remove(&path);
+        }
+        Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::FakeRemote;
+    use super::*;
+    use crate::api::{RemoteDeleted, RemoteEntry, RemoteFile};
+
+    fn file(path: &str, rev: &str) -> RemoteEntry {
+        RemoteEntry::File(RemoteFile {
+            path_lower: path.to_lowercase(),
+            path_display: path.to_string(),
+            rev: rev.to_string(),
+            size: 0,
+            content_hash: None,
+        })
+    }
+
+    fn tombstone(path: &str) -> RemoteEntry {
+        RemoteEntry::Deleted(RemoteDeleted {
+            path_lower: path.to_lowercase(),
+            path_display: Some(path.to_string()),
+        })
+    }
+
+    fn page(entries: Vec<RemoteEntry>, cursor: &str, has_more: bool) -> Result<ListFolderPage> {
+        Ok(ListFolderPage {
+            entries,
+            cursor: cursor.to_string(),
+            has_more,
+        })
+    }
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        applier: RemoteApplier<FakeRemote>,
+    }
+
+    impl Fixture {
+        /// An applier over a fresh temp directory, with `cursor` as its
+        /// starting position (`None` forces a full listing).
+        fn new(cursor: Option<&str>) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = SyncState::new();
+            if let Some(cursor) = cursor {
+                state.set_cursor(cursor);
+            }
+            let db = StateDb::at(dir.path().join("state.json"));
+            let paths = PathMapper::new(dir.path().join("root"), "");
+            std::fs::create_dir_all(dir.path().join("root")).unwrap();
+            Self {
+                applier: RemoteApplier::new(FakeRemote::new(), paths, db, state),
+                dir,
+            }
+        }
+
+        fn remote(&self) -> &FakeRemote {
+            &self.applier.source
+        }
+
+        fn local(&self, relative: &str) -> std::path::PathBuf {
+            self.dir.path().join("root").join(relative)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pull_applies_a_page_and_advances_the_cursor() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/a.txt", b"hello");
+        fixture
+            .remote()
+            .queue_continue(page(vec![file("/a.txt", "r1")], "c1", false));
+
+        let pull = fixture.applier.pull().await.unwrap();
+        assert_eq!(pull.applied, 1);
+        assert!(!pull.resynced);
+        assert_eq!(fixture.applier.cursor(), Some("c1"));
+        assert_eq!(std::fs::read(fixture.local("a.txt")).unwrap(), b"hello");
+    }
+
+    /// `has_more` means the change stream is not drained; stopping early would
+    /// leave the local copy silently behind.
+    #[tokio::test]
+    async fn paging_continues_until_has_more_is_false() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/a.txt", b"a");
+        fixture.remote().put("/b.txt", b"b");
+        fixture
+            .remote()
+            .queue_continue(page(vec![file("/a.txt", "r1")], "c1", true));
+        fixture
+            .remote()
+            .queue_continue(page(vec![file("/b.txt", "r1")], "c2", false));
+
+        let pull = fixture.applier.pull().await.unwrap();
+        assert_eq!(pull.applied, 2);
+        assert_eq!(fixture.applier.cursor(), Some("c2"));
+        // The second page must be fetched with the cursor the first returned.
+        assert_eq!(fixture.remote().cursors_used(), vec!["c0", "c1"]);
+    }
+
+    /// The cursor is persisted as each page lands, so a restart resumes from
+    /// the last fully applied page rather than the start.
+    #[tokio::test]
+    async fn the_cursor_is_persisted_as_pages_are_applied() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/a.txt", b"a");
+        fixture
+            .remote()
+            .queue_continue(page(vec![file("/a.txt", "r1")], "c1", false));
+        fixture.applier.pull().await.unwrap();
+
+        let db = StateDb::at(fixture.dir.path().join("state.json"));
+        assert_eq!(db.load().unwrap().cursor(), Some("c1"));
+    }
+
+    #[tokio::test]
+    async fn a_tombstone_in_the_stream_deletes_locally() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/a.txt", b"a");
+        fixture
+            .remote()
+            .queue_continue(page(vec![file("/a.txt", "r1")], "c1", false));
+        fixture.applier.pull().await.unwrap();
+
+        fixture
+            .remote()
+            .queue_continue(page(vec![tombstone("/a.txt")], "c2", false));
+        fixture.applier.pull().await.unwrap();
+
+        assert!(!fixture.local("a.txt").exists());
+        assert!(fixture.applier.state().get("/a.txt").is_none());
+    }
+
+    /// With no cursor at all, the first pull is a full listing.
+    #[tokio::test]
+    async fn a_first_run_lists_the_whole_folder() {
+        let mut fixture = Fixture::new(None);
+        fixture.remote().put("/a.txt", b"a");
+        fixture
+            .remote()
+            .queue_listing(page(vec![file("/a.txt", "r1")], "c1", false));
+
+        let pull = fixture.applier.pull().await.unwrap();
+        assert!(pull.resynced);
+        assert_eq!(fixture.applier.cursor(), Some("c1"));
+        assert!(fixture.local("a.txt").exists());
+    }
+
+    /// The reset path: `continue` fails, and the applier re-lists rather than
+    /// giving up.
+    #[tokio::test]
+    async fn a_cursor_reset_falls_back_to_a_full_listing() {
+        let mut fixture = Fixture::new(Some("stale"));
+        fixture.remote().put("/a.txt", b"a");
+        fixture.remote().queue_continue(Err(Error::CursorReset));
+        fixture
+            .remote()
+            .queue_listing(page(vec![file("/a.txt", "r1")], "fresh", false));
+
+        let pull = fixture.applier.pull().await.unwrap();
+        assert!(pull.resynced);
+        assert_eq!(fixture.applier.cursor(), Some("fresh"));
+        assert!(fixture.local("a.txt").exists());
+    }
+
+    /// A re-list must reconcile, not re-download: a file we already hold at the
+    /// same revision is left alone.
+    #[tokio::test]
+    async fn a_re_list_skips_files_we_already_have() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/a.txt", b"a");
+        fixture
+            .remote()
+            .queue_continue(page(vec![file("/a.txt", "r1")], "c1", false));
+        fixture.applier.pull().await.unwrap();
+
+        fixture.remote().queue_continue(Err(Error::CursorReset));
+        fixture
+            .remote()
+            .queue_listing(page(vec![file("/a.txt", "r1")], "fresh", false));
+        fixture.applier.pull().await.unwrap();
+
+        assert_eq!(fixture.remote().downloads(), 1);
+    }
+
+    /// A file deleted remotely while the daemon was down leaves no tombstone in
+    /// a fresh listing — it is simply absent, and must still be removed.
+    #[tokio::test]
+    async fn a_re_list_deletes_files_the_remote_no_longer_has() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/a.txt", b"a");
+        fixture.remote().put("/b.txt", b"b");
+        fixture.remote().queue_continue(page(
+            vec![file("/a.txt", "r1"), file("/b.txt", "r1")],
+            "c1",
+            false,
+        ));
+        fixture.applier.pull().await.unwrap();
+
+        fixture.remote().queue_continue(Err(Error::CursorReset));
+        fixture
+            .remote()
+            .queue_listing(page(vec![file("/a.txt", "r1")], "fresh", false));
+        fixture.applier.pull().await.unwrap();
+
+        assert!(fixture.local("a.txt").exists());
+        assert!(!fixture.local("b.txt").exists());
+        assert!(fixture.applier.state().get("/b.txt").is_none());
+    }
+
+    /// One unapplicable entry must not stall the stream behind it.
+    #[tokio::test]
+    async fn a_failing_entry_does_not_block_the_rest_of_the_page() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/good.txt", b"g");
+        fixture.remote().queue_continue(page(
+            vec![file("/../escape.txt", "r1"), file("/good.txt", "r1")],
+            "c1",
+            false,
+        ));
+
+        let pull = fixture.applier.pull().await.unwrap();
+        assert_eq!(pull.applied, 1);
+        assert_eq!(fixture.applier.cursor(), Some("c1"));
+        assert!(fixture.local("good.txt").exists());
+    }
+}

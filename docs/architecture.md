@@ -69,6 +69,31 @@ Both directions funnel through a single **reconciler** so that a change is never
 both directions at once; the reconciler owns the local↔remote state database and is the only
 component allowed to write it.
 
+### Remote-to-local application
+
+`RemoteApplier::pull` is what a `Changed` signal turns into. It drains
+`list_folder/continue` until `has_more` is false, applying each entry as it goes:
+
+- **File** — downloaded, unless the state already holds that `rev` *and* the file is still on
+  disk. The recorded entry is then re-derived from the file that landed, not from the
+  metadata, so the local watcher does not read our own download as a local edit.
+- **Folder** — created, since a change stream can deliver a file before its parent.
+- **Tombstone** — the path is removed along with everything under it. Dropbox sends one
+  tombstone for a deleted folder, not one per child.
+
+Three rules hold the whole thing together:
+
+- **The cursor advances only after its page has been applied**, and is persisted immediately.
+  A crash therefore re-delivers a page rather than skipping it, and re-applying a page is
+  harmless because every operation is idempotent.
+- **A cursor reset is routine, not an error.** `pull` catches it, drops the cursor, and
+  re-lists. The re-list *reconciles*: entries whose `rev` still matches are skipped, and
+  anything in the state the listing does not mention was deleted remotely while we were
+  offline, so it is removed locally too.
+- **Paths from Dropbox are untrusted.** `PathMapper` refuses any path that would escape the
+  sync root rather than clamping it, and one unapplicable entry is logged and stepped over
+  rather than stalling the stream behind it.
+
 ## Repository layout
 
 Per the "keep the code split up" rule in `CLAUDE.md`, each of these is its own module, not a
@@ -93,9 +118,15 @@ implementation yet.
 | `src/auth/loopback.rs` | One-shot loopback listener for the redirect | done |
 | `src/auth/store.rs` | Refresh token at rest, owner-only, atomic writes | done |
 | `src/auth/provider.rs` | Access-token cache, expiry skew, refresh-on-401 | done |
-| `src/api.rs` | Typed wrappers over the authenticated endpoints | stub |
+| `src/api/client.rs` | Authenticated HTTP client, error mapping, refresh-on-401 | done |
+| `src/api/metadata.rs` | The `.tag`-tagged file/folder/tombstone shapes | done |
+| `src/api/list_folder.rs` | `list_folder` and `list_folder/continue` | done |
+| `src/api/download.rs` | Streaming download with an atomic rename into place | done |
+| `src/reconcile/mod.rs` | `RemoteApplier`: drains the change stream, advances the cursor | remote direction done |
+| `src/reconcile/paths.rs` | Dropbox path ⇄ local path, with traversal refused | done |
+| `src/reconcile/source.rs` | The `RemoteSource` trait the applier is written against | done |
+| `src/reconcile/apply.rs` | Applying one entry: download, mkdir, delete subtree | done |
 | `src/watcher.rs` | inotify subscription plus debounce/coalescing | stub |
-| `src/reconcile.rs` | Change-application engine: conflicts, ordering, retries | stub |
 | `src/daemon.rs` | Process lifecycle, signals, wiring the above together | stub |
 
 The `notify` crate (inotify bindings) is renamed to `notify_fs` in `Cargo.toml`, because the
