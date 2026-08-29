@@ -43,6 +43,18 @@ use crate::api::ListFolderPage;
 use crate::error::{Error, Result};
 use crate::state::{StateDb, SyncState, key_for};
 
+/// How many applied entries between interim state saves inside one page.
+///
+/// A compromise: the state file is rewritten whole, so saving per entry would
+/// make a large pull O(n²) in bytes written, while saving too rarely is what
+/// this exists to avoid. At 100 an interrupt costs at most 99 re-downloads.
+const CHECKPOINT_EVERY: usize = 100;
+
+/// Whether `applied` entries into a page is a point to save state at.
+fn is_checkpoint(applied: usize) -> bool {
+    applied > 0 && applied.is_multiple_of(CHECKPOINT_EVERY)
+}
+
 /// What one pull did. Reported so the daemon can log it and the tests can pin
 /// the re-list path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -158,6 +170,14 @@ impl<S: RemoteSource + RemoteSink> Reconciler<S> {
     ///
     /// The order matters: advancing first would let a crash mid-page lose
     /// changes permanently, whereas re-applying a page is harmless.
+    ///
+    /// Entries are also checkpointed *within* the page, every
+    /// [`CHECKPOINT_EVERY`] applications. A first listing arrives in pages of up
+    /// to ten thousand entries, so saving only at the page boundary means an
+    /// interrupt hours in loses every entry recorded since the last one — the
+    /// files are on disk but untracked, and the next run downloads them all
+    /// again. These interim saves never touch the cursor, so the
+    /// apply-before-advance ordering above still holds.
     async fn apply_page(&mut self, page: ListFolderPage) -> Result<usize> {
         let mut applied = 0;
         for entry in &page.entries {
@@ -168,6 +188,10 @@ impl<S: RemoteSource + RemoteSink> Reconciler<S> {
                 Err(error) => {
                     tracing::warn!(path = entry.display_path(), %error, "could not apply entry")
                 }
+            }
+            if is_checkpoint(applied) {
+                self.db.save(&self.state)?;
+                tracing::debug!(applied, "checkpointed mid-page");
             }
         }
         self.state.set_cursor(page.cursor);
@@ -342,6 +366,42 @@ mod tests {
 
         let db = StateDb::at(fixture.dir.path().join("state.json"));
         assert_eq!(db.load().unwrap().cursor(), Some("c1"));
+    }
+
+    /// A page bigger than the checkpoint interval must persist entries as it
+    /// goes. Without interim saves an interrupt part-way through a huge first
+    /// listing loses every entry applied so far and re-downloads them all.
+    #[tokio::test]
+    async fn entries_are_checkpointed_within_a_long_page() {
+        let mut fixture = Fixture::new(Some("c0"));
+        let entries: Vec<_> = (0..CHECKPOINT_EVERY + 5)
+            .map(|i| {
+                let path = format!("/f{i}.txt");
+                fixture.remote().put(&path, b"x");
+                file(&path, "r1")
+            })
+            .collect();
+        fixture.remote().queue_continue(page(entries, "c1", false));
+
+        fixture.applier.pull().await.unwrap();
+
+        let saved = StateDb::at(fixture.dir.path().join("state.json"))
+            .load()
+            .unwrap();
+        assert_eq!(saved.len(), CHECKPOINT_EVERY + 5);
+        assert_eq!(saved.cursor(), Some("c1"));
+    }
+
+    /// Interim saves land on the interval and nowhere else. The end-to-end
+    /// case — killing the process mid-page — cannot be reached from a unit
+    /// test, so the interval itself is what gets covered here.
+    #[test]
+    fn state_is_checkpointed_on_the_interval_only() {
+        assert!(!is_checkpoint(0), "no save before anything is applied");
+        assert!(!is_checkpoint(CHECKPOINT_EVERY - 1));
+        assert!(is_checkpoint(CHECKPOINT_EVERY));
+        assert!(!is_checkpoint(CHECKPOINT_EVERY + 1));
+        assert!(is_checkpoint(CHECKPOINT_EVERY * 3));
     }
 
     #[tokio::test]

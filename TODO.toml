@@ -19,3 +19,15 @@ add_proposed_work = "Add proposed work as a new task rather than losing it."
 remove_dropped_items = "Remove dropped items with a one-line why."
 finish_work = "When a task is fully finished (built, tested, documented), run `scripts/todo.sh done <id>` to move it to FINISHED.toml."
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
+
+[[task]]
+id = "resume-an-interrupted-initial-pull-instead-of-re-listing"
+title = "Resume an interrupted initial pull instead of re-listing"
+description = "The cursor is persisted before any file entries are, so a first pull that is killed part-way leaves state.json holding a valid cursor with entries={}. That is indistinguishable from a fresh start, so the next run does a full re-list and re-downloads everything. Observed live: the initial pull was interrupted twice and re-listed from scratch both times. Harmless on a small account, expensive on a large one. Fix so an interrupted pull resumes from what it already has."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "normal"
+order = 10
+created = 2026-08-29
+tags = ["sync", "state"]
