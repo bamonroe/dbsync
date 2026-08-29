@@ -3,13 +3,21 @@
 //! The body is streamed to a temporary file and renamed into place, so a
 //! half-written download can never be mistaken for the real file — the same
 //! atomic-replace rule the state database follows.
+//!
+//! A file takes one of two shapes, decided by its size. A small one arrives on
+//! a single stream and resumes from the length of its partial. A large one is
+//! split by [`super::chunks`] into fixed ranges written at their true offsets,
+//! where the length means nothing and completion is "every chunk present" —
+//! see [`super::partial`].
 
 use std::path::Path;
 
 use serde::Serialize;
 
 use super::chunkmap::MAP_SUFFIX;
+use super::chunks::{ChunkPlan, Chunking};
 use super::client::ApiClient;
+use super::partial::Partial;
 use super::range::ByteRange;
 use crate::error::{Error, Result};
 
@@ -38,19 +46,30 @@ impl ApiClient {
     /// strays from a hard kill are cleared at startup by
     /// [`crate::reconcile::sweep::partial_downloads`].
     ///
-    /// `size` is the revision's length. Nothing needs it while the whole file
-    /// arrives on one stream, but chunked fetching cannot plan its ranges
-    /// without it, and the caller has had it all along.
+    /// `size` decides the shape of the fetch: a small file arrives on one
+    /// stream and resumes by length, while a large one is split into fixed
+    /// chunks written at their true offsets and is only renamed once every
+    /// chunk is present.
     pub async fn download_to(
         &self,
         remote_path: &str,
         rev: &str,
-        _size: u64,
+        size: u64,
         dest: &Path,
     ) -> Result<()> {
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        let plan = ChunkPlan::new(size, Chunking::default());
+        if !plan.is_whole_file() {
+            return self.download_chunked(remote_path, rev, plan, dest).await;
+        }
+        self.download_whole(remote_path, rev, dest).await
+    }
+
+    /// The single-stream fetch: one request, appended to and renamed when the
+    /// body ends. Progress here really is the partial's length.
+    async fn download_whole(&self, remote_path: &str, rev: &str, dest: &Path) -> Result<()> {
         let partial = partial_path(dest, rev);
         let have = existing_len(&partial).await;
 
@@ -82,6 +101,55 @@ impl ApiClient {
         drop(file);
         tokio::fs::rename(&partial, dest).await?;
         Ok(())
+    }
+
+    /// The chunked fetch: every missing range, into one preallocated partial.
+    ///
+    /// Sequential for now — making these overlap is what actually buys the
+    /// throughput, and it composes with the byte budget rather than being a
+    /// property of this loop.
+    ///
+    /// Every chunk addresses `rev:…`, so they provably come from one
+    /// revision: a remote edit mid-download cannot splice two versions
+    /// together, it simply starts a different partial.
+    async fn download_chunked(
+        &self,
+        remote_path: &str,
+        rev: &str,
+        plan: ChunkPlan,
+        dest: &Path,
+    ) -> Result<()> {
+        let path = partial_path(dest, rev);
+        let mut partial = Partial::open(&path, plan).await?;
+        let missing = partial.missing();
+        tracing::debug!(
+            path = remote_path,
+            chunks = plan.count(),
+            fetching = missing.len(),
+            "downloading in chunks"
+        );
+        for index in missing {
+            let Some(range) = plan.range(index) else {
+                continue;
+            };
+            let mut response = self.request_range(rev, range).await?;
+            partial.write_chunk(index, &mut response).await?;
+        }
+        // Gated on every chunk being present, never on the length: the partial
+        // has been full length since the last chunk's offset was written.
+        partial.finish(dest).await
+    }
+
+    /// Ask one immutable revision for exactly `range`.
+    async fn request_range(&self, rev: &str, range: ByteRange) -> Result<reqwest::Response> {
+        self.content_download_from(
+            "files/download",
+            &DownloadRequest {
+                path: &format!("rev:{rev}"),
+            },
+            range,
+        )
+        .await
     }
 
     /// Ask for `rev`, from `offset` onwards when that is not the start.

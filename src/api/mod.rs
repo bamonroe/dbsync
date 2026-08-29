@@ -15,6 +15,7 @@ mod client;
 mod download;
 mod list_folder;
 mod metadata;
+mod partial;
 mod range;
 mod upload;
 
