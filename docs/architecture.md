@@ -81,6 +81,19 @@ component allowed to write it.
 - **Tombstone** — the path is removed along with everything under it. Dropbox sends one
   tombstone for a deleted folder, not one per child.
 
+Each entry is applied in **three phases**, and the split is structural rather than tidiness.
+`decide` reads the state and works out what the entry calls for — skip, download, download
+over preserved local bytes, mkdir, or delete. `fetch` performs it and reads no state at all.
+`record` then writes the state to match. The exclusive borrow of the state is therefore held
+either side of the download but never across it, which is the precondition for having more
+than one download in flight: concurrent fetches cannot each hold `&mut` on one state.
+
+Two consequences worth knowing. The conflict check belongs to `decide`, not to the download,
+because asking after the fetch would reopen the window that spurious conflicted copies came
+through. And because `record` runs only once `fetch` succeeded, a failed removal leaves the
+state describing what is still on disk — the alternative would leave those files untracked and
+they would be uploaded straight back.
+
 Three rules hold the whole thing together:
 
 - **The cursor advances only after its page has been applied**, and is persisted immediately.
@@ -214,7 +227,7 @@ implementation yet.
 | `src/reconcile/source.rs` | The `RemoteSource` trait the applier is written against | done |
 | `src/reconcile/sink.rs` | The `RemoteSink` trait: upload and delete | done |
 | `src/reconcile/local.rs` | Pushing one local path: upload, delete, or decide it is unchanged | done |
-| `src/reconcile/apply.rs` | Applying one entry: download, mkdir, delete subtree | done |
+| `src/reconcile/apply.rs` | Applying one entry in three phases: decide, fetch, record | done |
 | `src/reconcile/conflict.rs` | Conflicted-copy naming, and detecting an unsent local edit | done |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |
 | `src/watcher/debounce.rs` | Per-path quiet-period coalescing | done |

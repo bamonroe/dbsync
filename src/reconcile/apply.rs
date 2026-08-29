@@ -1,9 +1,16 @@
 //! Applying one remote entry to the local disk.
 //!
-//! Each function here handles a single change and updates the state to match
-//! what it just did, so the state never claims a file the disk does not have.
+//! Applying happens in three phases, and the split is load-bearing rather than
+//! cosmetic. [`decide`] reads the state, [`fetch`] does the network and disk
+//! work and reads nothing, and [`record`] writes the state. The exclusive
+//! borrow of [`SyncState`] is therefore held either side of the download but
+//! never *across* it — which is what allows more than one file to be in flight
+//! at once, since concurrent downloads cannot each hold `&mut` on one state.
+//!
+//! Run in order the three phases still leave the state describing exactly what
+//! the disk holds, so the state never claims a file that is not there.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::api::{RemoteEntry, RemoteFile};
 use crate::error::{Error, Result};
@@ -32,6 +39,32 @@ pub enum Applied {
     Conflicted,
 }
 
+/// What applying one entry will do, decided before any work happens.
+///
+/// Borrowing from the entry rather than copying out of it keeps the decision
+/// free: a plan is only ever used while the page that produced it is alive.
+struct Plan<'a> {
+    /// Where on disk this entry lands.
+    local: PathBuf,
+    action: Action<'a>,
+}
+
+/// The work a [`Plan`] calls for.
+enum Action<'a> {
+    /// Already correct locally — a remote echo of what we hold.
+    Skip,
+    /// Fetch this revision, first setting the local bytes aside when
+    /// `preserve` says they diverged from what we last recorded.
+    Download {
+        file: &'a RemoteFile,
+        preserve: bool,
+    },
+    /// Create a directory.
+    Directory,
+    /// Remove this path and forget everything under it.
+    Delete { display_path: &'a str },
+}
+
 /// Apply one entry from a listing or change stream.
 pub async fn apply_entry<S: RemoteSource>(
     source: &S,
@@ -39,50 +72,88 @@ pub async fn apply_entry<S: RemoteSource>(
     state: &mut SyncState,
     entry: &RemoteEntry,
 ) -> Result<Applied> {
+    let plan = decide(paths, state, entry)?;
+    let applied = fetch(source, &plan).await?;
+    record(state, &plan)?;
+    Ok(applied)
+}
+
+/// Phase one: work out what to do, reading the state but touching nothing.
+fn decide<'a>(paths: &PathMapper, state: &SyncState, entry: &'a RemoteEntry) -> Result<Plan<'a>> {
     let local = paths.to_local(entry.display_path())?;
-    match entry {
-        RemoteEntry::File(file) => apply_file(source, state, file, &local).await,
-        RemoteEntry::Folder(_) => {
-            tokio::fs::create_dir_all(&local).await?;
-            Ok(Applied::Directory)
-        }
-        RemoteEntry::Deleted(_) => apply_delete(state, entry.display_path(), &local).await,
-    }
+    let action = match entry {
+        RemoteEntry::File(file) => decide_file(state, file, &local)?,
+        RemoteEntry::Folder(_) => Action::Directory,
+        RemoteEntry::Deleted(_) => Action::Delete {
+            display_path: entry.display_path(),
+        },
+    };
+    Ok(Plan { local, action })
 }
 
 /// Download a file unless we already hold exactly that revision.
-async fn apply_file<S: RemoteSource>(
-    source: &S,
-    state: &mut SyncState,
-    file: &RemoteFile,
-    local: &Path,
-) -> Result<Applied> {
+fn decide_file<'a>(state: &SyncState, file: &'a RemoteFile, local: &Path) -> Result<Action<'a>> {
     if is_current(state, file, local) {
-        return Ok(Applied::AlreadyCurrent);
+        return Ok(Action::Skip);
     }
     // Both sides moved: the remote version is about to land on this path, so
     // the local bytes have to be set aside first or they are gone for good.
-    let conflicted = conflict::has_local_edit(
+    // This check reads the state, so it belongs here and not beside the
+    // download — asking later would reopen the window that spurious conflicted
+    // copies came through.
+    let preserve = conflict::has_local_edit(
         state,
         &file.path_display,
         local,
         file.content_hash.as_deref(),
     )?;
-    if conflicted {
-        conflict::preserve(local).await?;
+    Ok(Action::Download { file, preserve })
+}
+
+/// Phase two: do the network and disk work. Reads no state and writes none,
+/// which is what makes this the phase that can run many at a time.
+async fn fetch<S: RemoteSource>(source: &S, plan: &Plan<'_>) -> Result<Applied> {
+    match &plan.action {
+        Action::Skip => Ok(Applied::AlreadyCurrent),
+        Action::Download { file, preserve } => {
+            if *preserve {
+                conflict::preserve(&plan.local).await?;
+            }
+            source
+                .download_to(&file.path_display, &file.rev, &plan.local)
+                .await?;
+            Ok(match *preserve {
+                true => Applied::Conflicted,
+                false => Applied::Downloaded,
+            })
+        }
+        Action::Directory => {
+            tokio::fs::create_dir_all(&plan.local).await?;
+            Ok(Applied::Directory)
+        }
+        Action::Delete { .. } => remove_local(&plan.local).await,
     }
-    source
-        .download_to(&file.path_display, &file.rev, local)
-        .await?;
-    // Re-describe from disk rather than from the metadata: the hash and mtime
-    // must be the ones a local scan will actually see, or the very next scan
-    // would read this file as a local edit and upload it straight back.
-    let entry = entry_for_local_file(local, &file.path_display, &file.rev)?;
-    state.insert(entry);
-    Ok(match conflicted {
-        true => Applied::Conflicted,
-        false => Applied::Downloaded,
-    })
+}
+
+/// Phase three: bring the state up to date with what [`fetch`] just did.
+///
+/// Only reached once the fetch succeeded, so a failed download or a directory
+/// that could not be removed leaves the state alone and the path is re-applied
+/// when the change stream next mentions it.
+fn record(state: &mut SyncState, plan: &Plan<'_>) -> Result<()> {
+    match &plan.action {
+        Action::Download { file, .. } => {
+            // Re-describe from disk rather than from the metadata: the hash and
+            // mtime must be the ones a local scan will actually see, or the very
+            // next scan would read this file as a local edit and upload it
+            // straight back.
+            let entry = entry_for_local_file(&plan.local, &file.path_display, &file.rev)?;
+            state.insert(entry);
+        }
+        Action::Delete { display_path } => forget_subtree(state, display_path),
+        Action::Skip | Action::Directory => {}
+    }
+    Ok(())
 }
 
 /// Would downloading this file be a no-op?
@@ -97,8 +168,9 @@ fn is_current(state: &SyncState, file: &RemoteFile, local: &Path) -> bool {
 }
 
 /// Remove a path the remote says is gone, along with anything under it.
-async fn apply_delete(state: &mut SyncState, display_path: &str, local: &Path) -> Result<Applied> {
-    forget_subtree(state, display_path);
+///
+/// The state half of a delete is [`record`]'s job; this only touches the disk.
+async fn remove_local(local: &Path) -> Result<Applied> {
     match tokio::fs::symlink_metadata(local).await {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Applied::NothingToDelete),
         Err(error) => Err(Error::ReadFile {
@@ -396,5 +468,124 @@ mod tests {
         // Same rev, but the file is not on disk, so this attempts a download
         // the fake remote cannot serve.
         assert!(fixture.apply(&file("/missing.txt", "r0")).await.is_err());
+    }
+
+    /// The decision phase needs no remote and touches nothing, which is the
+    /// property the concurrent download path is built on. These cover it
+    /// directly rather than through `apply_entry`.
+    mod decide {
+        use super::*;
+
+        /// Decide against a fresh state and an empty directory.
+        fn plan_for<'a>(fixture: &Fixture, entry: &'a RemoteEntry) -> Plan<'a> {
+            decide(&fixture.paths(), &fixture.state, entry).unwrap()
+        }
+
+        #[test]
+        fn an_unknown_file_is_a_download_with_nothing_to_preserve() {
+            let fixture = Fixture::new();
+            let entry = file("/a.txt", "r1");
+
+            let plan = plan_for(&fixture, &entry);
+
+            assert!(matches!(
+                plan.action,
+                Action::Download {
+                    preserve: false,
+                    ..
+                }
+            ));
+            assert_eq!(plan.local, fixture.local("a.txt"));
+        }
+
+        /// An untracked file already sitting on the path is someone else's
+        /// work until proven otherwise, so it is preserved before the download.
+        #[test]
+        fn an_untracked_local_file_is_a_download_that_preserves() {
+            let fixture = Fixture::new();
+            std::fs::write(fixture.local("a.txt"), b"mine").unwrap();
+            let entry = file("/a.txt", "r1");
+
+            let plan = plan_for(&fixture, &entry);
+
+            assert!(matches!(
+                plan.action,
+                Action::Download { preserve: true, .. }
+            ));
+        }
+
+        /// The revision we already hold is a no-op, and deciding that must not
+        /// need the network — this is what keeps a re-list cheap.
+        #[test]
+        fn a_revision_we_already_hold_is_skipped() {
+            let mut fixture = Fixture::new();
+            std::fs::write(fixture.local("a.txt"), b"hello").unwrap();
+            fixture.state.insert(SyncEntry {
+                display_path: "/a.txt".into(),
+                rev: "r1".into(),
+                ..entry_for_local_file(&fixture.local("a.txt"), "/a.txt", "r1").unwrap()
+            });
+            let entry = file("/a.txt", "r1");
+
+            assert!(matches!(plan_for(&fixture, &entry).action, Action::Skip));
+        }
+
+        #[test]
+        fn a_tombstone_is_a_delete_and_a_folder_is_a_directory() {
+            let fixture = Fixture::new();
+            let tombstone = deleted("/gone.txt");
+            let dir = folder("/photos");
+
+            assert!(matches!(
+                plan_for(&fixture, &tombstone).action,
+                Action::Delete {
+                    display_path: "/gone.txt"
+                }
+            ));
+            assert!(matches!(plan_for(&fixture, &dir).action, Action::Directory));
+        }
+
+        /// A path that escapes the sync root is rejected in the decision, so no
+        /// download is ever started for it.
+        #[test]
+        fn an_escaping_path_fails_before_any_work() {
+            let fixture = Fixture::new();
+            let entry = file("/../escape.txt", "r1");
+
+            assert!(decide(&fixture.paths(), &fixture.state, &entry).is_err());
+        }
+    }
+
+    /// Recording a delete only happens once the disk removal succeeded, so a
+    /// removal that fails leaves the state describing what is still there.
+    /// Otherwise the files would survive untracked and be uploaded back.
+    #[tokio::test]
+    async fn a_failed_delete_leaves_the_state_alone() {
+        let mut fixture = Fixture::new();
+        fixture.remote.put("/a.txt", b"a");
+        fixture.apply(&file("/a.txt", "r1")).await.unwrap();
+        // A directory where the tombstone expects a file: made read-only so the
+        // removal underneath it cannot succeed.
+        let doomed = fixture.local("locked");
+        std::fs::create_dir(&doomed).unwrap();
+        std::fs::write(doomed.join("child.txt"), b"child").unwrap();
+        let mut permissions = std::fs::metadata(&doomed).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&doomed, permissions).unwrap();
+        fixture.state.insert(SyncEntry {
+            display_path: "/locked/child.txt".into(),
+            ..entry_for_local_file(&doomed.join("child.txt"), "/locked/child.txt", "r1").unwrap()
+        });
+
+        let result = fixture.apply(&deleted("/locked")).await;
+
+        // Restore permissions first so the temp directory can be cleaned up.
+        let mut permissions = std::fs::metadata(&doomed).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&doomed, permissions).unwrap();
+
+        assert!(result.is_err());
+        assert!(fixture.state.get("/locked/child.txt").is_some());
     }
 }
