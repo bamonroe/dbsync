@@ -9,6 +9,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::client::ApiClient;
+use super::range::ByteRange;
 use crate::error::{Error, Result};
 
 /// Suffix for the partial file a download writes before its rename.
@@ -89,7 +90,7 @@ impl ApiClient {
         self.content_download_from(
             "files/download",
             &DownloadRequest { path },
-            (offset > 0).then_some(offset),
+            ByteRange::from(offset),
         )
         .await
     }

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use super::range::ByteRange;
 use crate::auth::TokenProvider;
 use crate::error::{Error, Result};
 
@@ -75,27 +76,30 @@ impl ApiClient {
 
     /// A GET-style content request: the argument travels in a header, and the
     /// body is the file. Returns the streaming response for the caller to drain.
-    /// When `resume_from` is set, asks only for the bytes from that offset
-    /// onwards — continuing an interrupted download rather than re-fetching
-    /// what is already on disk.
+    /// `range` says which bytes to ask for: the whole file, everything from an
+    /// offset onwards (a resume), or one bounded chunk. A bounded range is
+    /// verified against the reply, so a server that ignores it is an error
+    /// rather than a whole file written into one chunk's slot.
     pub(super) async fn content_download_from<Arg: Serialize>(
         &self,
         endpoint: &str,
         arg: &Arg,
-        resume_from: Option<u64>,
+        range: ByteRange,
     ) -> Result<reqwest::Response> {
         let url = format!("{CONTENT_HOST}/{endpoint}");
         let arg = serde_json::to_string(arg).map_err(|error| Error::Config(error.to_string()))?;
-        match self
-            .send_download(&url, &arg, self.tokens.access_token().await?, resume_from)
+        let response = match self
+            .send_download(&url, &arg, self.tokens.access_token().await?, range)
             .await
         {
             Err(Error::Unauthorized) => {
                 let token = self.tokens.force_refresh().await?;
-                self.send_download(&url, &arg, token, resume_from).await
+                self.send_download(&url, &arg, token, range).await
             }
             other => other,
-        }
+        }?;
+        range.verify(&response)?;
+        Ok(response)
     }
 
     /// A content request that carries bytes up: the argument travels in a
@@ -145,16 +149,17 @@ impl ApiClient {
         url: &str,
         arg: &str,
         token: String,
-        resume_from: Option<u64>,
+        range: ByteRange,
     ) -> Result<reqwest::Response> {
         let mut request = self
             .http
             .post(url)
             .bearer_auth(token)
             .header("Dropbox-API-Arg", arg);
-        if let Some(offset) = resume_from {
-            // Open-ended: everything from `offset` to the end of the file.
-            request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        // Asking for the whole file with a header would work, but omitting it
+        // keeps the common request byte-identical to what it always was.
+        if !range.is_whole_file() {
+            request = request.header(reqwest::header::RANGE, range.header_value());
         }
         check(request.send().await?).await
     }

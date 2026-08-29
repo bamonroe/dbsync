@@ -13,6 +13,7 @@ mod client;
 mod download;
 mod list_folder;
 mod metadata;
+mod range;
 mod upload;
 
 pub use client::ApiClient;
