@@ -66,7 +66,11 @@ implementation yet.
 | `src/notify/longpoll.rs` | The long-poll call: cursor in, outcome out | done |
 | `src/state/hash.rs` | Dropbox content hash (4 MiB SHA-256 tree) | done |
 | `src/state/mod.rs` | Local sync database; the only writer of sync state | stub |
-| `src/auth.rs` | OAuth2 PKCE flow, refresh-token storage, refresh on 401 | stub |
+| `src/auth/pkce.rs` | RFC 7636 verifier/challenge generation | done |
+| `src/auth/oauth.rs` | Authorize URL, code exchange, refresh | done |
+| `src/auth/loopback.rs` | One-shot loopback listener for the redirect | done |
+| `src/auth/store.rs` | Refresh token at rest, owner-only, atomic writes | done |
+| `src/auth/provider.rs` | Access-token cache, expiry skew, refresh-on-401 | done |
 | `src/api.rs` | Typed wrappers over the authenticated endpoints | stub |
 | `src/watcher.rs` | inotify subscription plus debounce/coalescing | stub |
 | `src/reconcile.rs` | Change-application engine: conflicts, ordering, retries | stub |
@@ -74,6 +78,30 @@ implementation yet.
 
 The `notify` crate (inotify bindings) is renamed to `notify_fs` in `Cargo.toml`, because the
 name collides with our own `crate::notify` module.
+
+## Authentication
+
+dbsync is a **public OAuth client**: it ships no app secret, so PKCE (RFC 7636) is what proves
+the token exchange comes from the same party that began the flow. Only the app key lives in
+`config.toml`.
+
+`token_access_type=offline` on the authorize URL is load-bearing — without it Dropbox returns
+no refresh token, and a daemon that must survive restarts would need re-approval every few
+hours.
+
+The redirect is caught by a **one-shot loopback listener** on the fixed port **53682**, which
+is why that port is a constant rather than an ephemeral one: the redirect URI has to be
+registered in the Dropbox app console ahead of time. The listener binds `127.0.0.1` only and
+exits as soon as it has a code. This is not a contradiction of the no-public-server rule
+above — nothing is ever reachable off the loopback interface.
+
+Two safety properties worth keeping:
+
+- The `state` parameter is random per login and checked on return, so a third party cannot
+  steer the listener into exchanging a code it did not request.
+- Access tokens are refreshed **five minutes before** their stated expiry, so a token cannot
+  expire between the check and the request that uses it. `TokenProvider::force_refresh` exists
+  for the 401 case, where a token was revoked ahead of schedule and the cache is untrustworthy.
 
 ## Container build
 

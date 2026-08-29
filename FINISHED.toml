@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "implement-oauth2-pkce-login-and-token-refresh"
+title = "Implement OAuth2 PKCE login and token refresh"
+description = "The 'auth' module: run the PKCE flow via 'dbsync auth login', persist the refresh token outside the repo, and transparently refresh on 401. No app secret on disk."
+status = "finished"
+level = "task"
+category = "feature"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["auth"]
+
+[[task]]
 id = "implement-dropbox-content-hashing"
 title = "Implement Dropbox content hashing"
 description = "The 4 MiB block SHA-256 tree Dropbox uses for content identity. Needed so the daemon recognises the echo of its own upload and does not re-apply it."

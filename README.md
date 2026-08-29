@@ -5,9 +5,10 @@ sync and behaves like the native desktop client — remote changes arrive by **p
 long-poll notification endpoint) rather than by periodic polling, so edits made elsewhere show
 up locally within seconds.
 
-> **Status:** early. The crate, container build, config loading, content hashing, and the
-> long-poll client are in place; **syncing is not implemented yet** — `dbsync run` will tell
-> you so and exit. See `TODO.toml` for what's active and `FINISHED.toml` for what has shipped.
+> **Status:** early. The crate, container build, config loading, account linking, content
+> hashing, and the long-poll client are in place; **syncing is not implemented yet** —
+> `dbsync run` will tell you so and exit. See `TODO.toml` for what's active and
+> `FINISHED.toml` for what has shipped.
 
 ## How it works
 
@@ -21,7 +22,8 @@ behind that choice are in [`docs/architecture.md`](docs/architecture.md).
 - Docker (or Podman) — the build and run both happen in a container; no host Rust toolchain
   is needed.
 - A Dropbox app created at <https://www.dropbox.com/developers/apps> with the
-  `files.content.read` and `files.content.write` scopes.
+  `files.content.read` and `files.content.write` scopes, and
+  `http://localhost:53682` added as a redirect URI.
 
 ## Build
 
@@ -43,11 +45,28 @@ Check that the daemon reads it as you expect:
 docker compose run --rm dbsync check
 ```
 
-Then link the account — this runs the OAuth flow and stores a refresh token:
+## Link your Dropbox account
 
 ```sh
-docker compose run --rm dbsync auth login     # not implemented yet
+docker compose run --rm -p 53682:53682 dbsync auth login
 ```
+
+This prints a URL. Open it, approve the app, and the browser is redirected back to
+`http://localhost:53682`, where dbsync catches the authorization code and exchanges it for a
+refresh token. The `-p` flag is required: without it the redirect cannot reach the container.
+
+dbsync uses OAuth2 **PKCE**, so no app secret is ever stored — only your app key, in
+`config.toml`. The refresh token is written to `~/.local/share/dbsync/credentials.json` with
+owner-only permissions (in the container, the `dbsync-auth` volume), never into the repo or
+the image.
+
+Check the link at any time:
+
+```sh
+docker compose run --rm dbsync auth status
+```
+
+If you revoke the app from the Dropbox account page, `auth login` again to re-link.
 
 ## Run
 

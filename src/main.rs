@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use dbsync::Config;
+use dbsync::auth::{self, TokenStore};
 
 #[derive(Parser)]
 #[command(name = "dbsync", version, about = "Realtime Dropbox sync daemon")]
@@ -71,13 +72,40 @@ async fn main() -> anyhow::Result<()> {
             let _config = Config::load(&cli.config)?;
             anyhow::bail!("the sync daemon is not implemented yet — see TODO.toml")
         }
-        Command::Auth { action } => match action {
-            AuthAction::Login => {
-                anyhow::bail!("`auth login` is not implemented yet — see TODO.toml")
+        Command::Auth { action } => {
+            let config = Config::load(&cli.config)?;
+            let store = TokenStore::default_location()?;
+            match action {
+                AuthAction::Login => {
+                    let credentials = auth::login(&config.app_key, &store).await?;
+                    println!(
+                        "\nLinked{}. Credentials saved to {}.",
+                        credentials
+                            .account_id
+                            .map(|id| format!(" account {id}"))
+                            .unwrap_or_default(),
+                        store.path().display()
+                    );
+                    Ok(())
+                }
+                AuthAction::Status => match store.load() {
+                    Ok(credentials) => {
+                        println!("linked:  yes");
+                        println!(
+                            "account: {}",
+                            credentials.account_id.as_deref().unwrap_or("?")
+                        );
+                        println!("store:   {}", store.path().display());
+                        Ok(())
+                    }
+                    Err(dbsync::Error::NotAuthenticated) => {
+                        println!("linked:  no — run `dbsync auth login`");
+                        println!("store:   {}", store.path().display());
+                        Ok(())
+                    }
+                    Err(e) => Err(e.into()),
+                },
             }
-            AuthAction::Status => {
-                anyhow::bail!("`auth status` is not implemented yet — see TODO.toml")
-            }
-        },
+        }
     }
 }
