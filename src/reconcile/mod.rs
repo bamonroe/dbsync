@@ -408,7 +408,7 @@ mod tests {
         let count = page::CHECKPOINT_EVERY + 5;
         let mut fixture = Fixture::new(Some("c0"));
         let entries = fixture.stage_files(count);
-        fixture.remote().stall("/f0.txt", count);
+        fixture.remote().stall("/f0.txt", count - 1);
         fixture.remote().queue_continue(page(entries, "c1", false));
 
         fixture.applier.pull().await.unwrap();

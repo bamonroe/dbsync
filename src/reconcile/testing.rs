@@ -80,13 +80,18 @@ impl FakeRemote {
         self.in_flight.lock().unwrap().1
     }
 
-    /// Hold downloads of `path` back for `rounds` extra yields, so it finishes
-    /// after files listed behind it.
-    pub fn stall(&self, path: &str, rounds: usize) {
+    /// Hold downloads of `path` back until `others` other downloads have
+    /// finished, so it lands last however the runtime schedules them.
+    ///
+    /// Counting completions rather than yields is what makes this
+    /// deterministic: a download's final step is a real filesystem write, and
+    /// how many times that await reschedules is not fixed, so a stall measured
+    /// in yields loses the race intermittently.
+    pub fn stall(&self, path: &str, others: usize) {
         self.stalls
             .lock()
             .unwrap()
-            .insert(path.to_lowercase(), rounds);
+            .insert(path.to_lowercase(), others);
     }
 
     /// Which downloads finished, in the order they actually finished.
@@ -170,7 +175,12 @@ impl RemoteSource for FakeRemote {
             .get(&remote_path.to_lowercase())
             .copied()
             .unwrap_or(0);
-        for _ in 0..stall {
+        // Bounded so a stall that can never be satisfied fails the test rather
+        // than hanging the suite.
+        for _ in 0..10_000 {
+            if self.completed.lock().unwrap().len() >= stall {
+                break;
+            }
             tokio::task::yield_now().await;
         }
         if let Some(parent) = dest.parent() {
