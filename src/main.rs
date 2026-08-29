@@ -69,8 +69,9 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Run => {
-            let _config = Config::load(&cli.config)?;
-            anyhow::bail!("the sync daemon is not implemented yet — see TODO.toml")
+            let config = Config::load(&cli.config)?;
+            dbsync::daemon::run(&config).await?;
+            Ok(())
         }
         Command::Auth { action } => {
             let config = Config::load(&cli.config)?;

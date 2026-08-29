@@ -55,15 +55,3 @@ urgency = "normal"
 order = 110
 created = 2026-08-29
 tags = ["docs"]
-
-[[task]]
-id = "wire-the-daemon-long-poll-loop-plus-remote-applier"
-title = "Wire the daemon: long-poll loop plus remote applier"
-description = "src/daemon.rs is still a stub. Build the ApiClient and RemoteApplier from Config, run an initial pull to get a cursor, feed that cursor to notify::channel, and translate RemoteEvent into pull() calls, republishing each new cursor through the CursorHandle. Handle SIGINT/SIGTERM by dropping the event receiver."
-status = "active"
-level = "task"
-category = "feature"
-urgency = "high"
-order = 120
-created = 2026-08-29
-tags = []

@@ -27,7 +27,7 @@ mod paths;
 mod sink;
 mod source;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
 pub use apply::Applied;
 pub use local::Pushed;

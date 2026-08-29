@@ -116,6 +116,29 @@ naming the revision we believe we are replacing. Dropbox therefore *refuses* a w
 would clobber a remote edit we have not seen yet, rather than silently winning. Handling that
 refusal — the conflicted-copy path — is the conflict task in `TODO.toml`.
 
+### The daemon loop
+
+`src/daemon` is where the concrete pieces meet; everything below it is written against traits,
+so this is the only part that needs a real account.
+
+Startup order is load-bearing. The daemon **pulls first**, before anything is watched: a first
+run has no cursor, so that pull is the full listing that produces one, and a later run applies
+whatever changed while it was down. Only then does it long-poll, on exactly that cursor, which
+is what closes the window between the listing and the park. The local watcher starts last,
+because the pull writes files and there is nothing to gain from feeding our own downloads into
+the debouncer.
+
+Both directions then run in **one** task. `Reconciler` owns the state database and is taken by
+`&mut`, so a pull and a push cannot overlap — the select loop in `src/daemon/sync.rs` is what
+serialises them, and that is what keeps a path from being written from both ends at once. Each
+pull republishes its new cursor through the `CursorHandle`, or the long-poll loop would wake on
+the change it has already been told about. A failed pull or push is logged, not fatal: the
+cursor was never advanced past unapplied work, so the next notification retries it.
+
+The select is `biased` on the shutdown future, so a constantly-changing directory cannot starve
+the exit. `SIGINT` and `SIGTERM` mean the same thing — finish the operation in flight, drop the
+event receiver, and abort the long-poll task, which may otherwise be parked for minutes.
+
 ## Repository layout
 
 Per the "keep the code split up" rule in `CLAUDE.md`, each of these is its own module, not a
@@ -153,7 +176,9 @@ implementation yet.
 | `src/reconcile/apply.rs` | Applying one entry: download, mkdir, delete subtree | done |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |
 | `src/watcher/debounce.rs` | Per-path quiet-period coalescing | done |
-| `src/daemon.rs` | Process lifecycle, signals, wiring the above together | stub |
+| `src/daemon/mod.rs` | Building the components from config and the startup order | done |
+| `src/daemon/sync.rs` | The one loop that serialises pulls and pushes | done |
+| `src/daemon/shutdown.rs` | SIGINT/SIGTERM as a single shutdown future | done |
 
 The `notify` crate (inotify bindings) is renamed to `notify_fs` in `Cargo.toml`, because the
 name collides with our own `crate::notify` module.

@@ -5,10 +5,10 @@ sync and behaves like the native desktop client — remote changes arrive by **p
 long-poll notification endpoint) rather than by periodic polling, so edits made elsewhere show
 up locally within seconds.
 
-> **Status:** early. The crate, container build, config loading, account linking, content
-> hashing, and the long-poll client are in place; **syncing is not implemented yet** —
-> `dbsync run` will tell you so and exit. See `TODO.toml` for what's active and
-> `FINISHED.toml` for what has shipped.
+> **Status:** working. Both sync directions are wired into the daemon, so `dbsync run`
+> pulls remote changes and uploads local ones. Conflict handling is still missing — a file
+> edited on both sides at once is not yet split into a conflicted copy. See `TODO.toml` for
+> what's active and `FINISHED.toml` for what has shipped.
 
 ## How it works
 
@@ -75,8 +75,15 @@ docker compose up dbsync          # foreground
 docker compose up -d dbsync       # detached
 ```
 
-The daemon syncs the directory named in `config.toml`. Logs go to stdout; raise verbosity
-with `RUST_LOG=debug`.
+Or, without a container, `cargo run -- run --config config.toml`.
+
+On startup the daemon applies everything the remote changed while it was down, then parks on
+the long-poll endpoint and watches the local directory. Logs go to stdout; raise verbosity
+with `RUST_LOG=debug`. `SIGINT` (Ctrl-C) or `SIGTERM` stops it after the operation in flight
+finishes, so the state file is never left describing a half-applied change.
+
+The first run has no cursor and lists the whole folder, which can take a while on a large
+account; later runs resume from the saved cursor in `state.json`.
 
 ## Development
 
