@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "sweep-orphaned-dbsync-partial-files"
+title = "Sweep orphaned .dbsync-partial files"
+description = "download_to removes its partial file when a download errors, but a hard kill leaves it on disk forever. Nothing ever sweeps them, so they accumulate silently in the synced tree — invisible to sync (the watcher filters them via is_partial) but real bytes. Add a cleanup pass, most naturally at startup before the initial pull."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["sync"]
+
+[[task]]
 id = "resume-an-interrupted-initial-pull-instead-of-re-listing"
 title = "Resume an interrupted initial pull instead of re-listing"
 description = "The cursor is persisted before any file entries are, so a first pull that is killed part-way leaves state.json holding a valid cursor with entries={}. That is indistinguishable from a fresh start, so the next run does a full re-list and re-downloads everything. Observed live: the initial pull was interrupted twice and re-listed from scratch both times. Harmless on a small account, expensive on a large one. Fix so an interrupted pull resumes from what it already has."
