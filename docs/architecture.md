@@ -109,6 +109,12 @@ budget conflict, the floor wins and the ceiling beats both, and a file larger th
 budget is charged the whole budget so it runs alone rather than never. The gate is written as a
 pure counter with no network or disk dependency.
 
+Measured against a live account on 2026-08-29, the defaults moved a first listing from **28
+files/min** (sequential, 2.0 MiB/s over a 60s window of large files) to **304–461 files/min**
+across two 60s windows of small files. The two windows are not the same workload, which is the
+point of the byte budget: the sequential loop was bounded by one request at a time whatever the
+size, so the gain shows up as file rate on small files and as link saturation on large ones.
+
 All three are **configurable** — `[download]` in `config.toml`, or the `DBSYNC_DOWNLOAD_*`
 environment overrides (README documents what an operator would change and when). They are
 tuning constants for a network-bound loop, and the right values depend on a link and an
