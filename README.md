@@ -38,6 +38,15 @@ Copy the example config and fill in your app key:
 cp config.example.toml config.toml
 ```
 
+`local_root` is the directory being synced, `/data/storage/dbsync` by default. In a
+container that is the path *inside* the container; set `DBSYNC_LOCAL_ROOT` to point the
+bind mount at a different host directory (it defaults to the same path on the host, so
+the two match out of the box):
+
+```sh
+DBSYNC_LOCAL_ROOT=/srv/dropbox docker compose up -d dbsync
+```
+
 `config.example.toml` lists every option the daemon accepts — a drift test
 (`tests/config_drift.rs`) fails the build if it ever gains or loses a key
 relative to the `Config` struct, so the example is always the complete reference.
