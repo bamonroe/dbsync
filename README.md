@@ -6,9 +6,8 @@ long-poll notification endpoint) rather than by periodic polling, so edits made 
 up locally within seconds.
 
 > **Status:** working. Both sync directions are wired into the daemon, so `dbsync run`
-> pulls remote changes and uploads local ones. Conflict handling is still missing — a file
-> edited on both sides at once is not yet split into a conflicted copy. See `TODO.toml` for
-> what's active and `FINISHED.toml` for what has shipped.
+> pulls remote changes, uploads local ones, and keeps conflicted copies when the two
+> diverge. See `TODO.toml` for what's active and `FINISHED.toml` for what has shipped.
 
 ## How it works
 
@@ -81,6 +80,14 @@ On startup the daemon applies everything the remote changed while it was down, t
 the long-poll endpoint and watches the local directory. Logs go to stdout; raise verbosity
 with `RUST_LOG=debug`. `SIGINT` (Ctrl-C) or `SIGTERM` stops it after the operation in flight
 finishes, so the state file is never left describing a half-applied change.
+
+### Conflicts
+
+If a file is edited locally and on Dropbox at the same time, dbsync keeps both. Your local
+version is copied to `name (conflicted copy).ext` next to the original — numbered
+`(conflicted copy 2)` and so on if it happens again — and the original path gets the version
+from Dropbox. Nothing is overwritten and nothing is discarded; you resolve it by hand, and the
+conflicted copy syncs up like any other file.
 
 The first run has no cursor and lists the whole folder, which can take a while on a large
 account; later runs resume from the saved cursor in `state.json`.

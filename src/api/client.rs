@@ -170,8 +170,15 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
         return Err(Error::RateLimited(retry_after(&response)));
     }
     let message = response.text().await.unwrap_or_default();
-    if status == reqwest::StatusCode::CONFLICT && message.contains("reset") {
-        return Err(Error::CursorReset);
+    if status == reqwest::StatusCode::CONFLICT {
+        // Both are 409s and only the body tells them apart: a dead cursor is
+        // routine bookkeeping, a rejected write is a conflict to preserve.
+        if message.contains("reset") {
+            return Err(Error::CursorReset);
+        }
+        if message.contains("conflict") {
+            return Err(Error::Conflict);
+        }
     }
     Err(Error::Api {
         status: status.as_u16(),
@@ -226,6 +233,20 @@ mod tests {
         assert!(matches!(
             check(response(409, r#"{"error": {".tag": "reset"}}"#)).await,
             Err(Error::CursorReset)
+        ));
+    }
+
+    /// A refused write is the conflict path, not a generic failure: the caller
+    /// must keep both versions rather than log and move on.
+    #[tokio::test]
+    async fn a_refused_write_is_a_conflict() {
+        assert!(matches!(
+            check(response(
+                409,
+                r#"{"error": {".tag": "path", "reason": {".tag": "conflict"}}}"#
+            ))
+            .await,
+            Err(Error::Conflict)
         ));
     }
 

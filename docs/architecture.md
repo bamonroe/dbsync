@@ -113,8 +113,27 @@ Our own partial downloads and the state database are filtered out before anythin
 
 Uploads are sent with `autorename: false` and, for a file we already know, `mode: update(rev)`
 naming the revision we believe we are replacing. Dropbox therefore *refuses* a write that
-would clobber a remote edit we have not seen yet, rather than silently winning. Handling that
-refusal — the conflicted-copy path — is the conflict task in `TODO.toml`.
+would clobber a remote edit we have not seen yet, rather than silently winning.
+
+### Conflicts
+
+dbsync never resolves a conflict by picking a winner. When the two sides have diverged, the
+local bytes are copied to `name (conflicted copy).ext` beside the original and the remote
+version takes the original path. `src/reconcile/conflict.rs` owns the naming (numbered on
+repeat, and a dotfile's leading dot is a name rather than an extension) and both entry points
+into it:
+
+- **Pushing** — Dropbox answers `update(rev)` with a 409 whose body says `conflict`, mapped to
+  `Error::Conflict`. The copy is made and uploaded under its own name with `add`, and the
+  original's state entry is re-stamped from disk. That re-stamp is what stops the watcher
+  retrying the same losing write on every event.
+- **Pulling** — before a download overwrites a path, `has_local_edit` asks whether the file on
+  disk holds bytes we never sent: absent, metadata-matching, and hash-matching all say no; a
+  file we never tracked says yes. If it does, the copy is made first.
+
+The copy is a **copy, never a rename**. A rename would make the original path vanish, the
+watcher would read that as a deletion, and dbsync would delete from Dropbox exactly the
+version it was trying to protect.
 
 ### The daemon loop
 
@@ -174,6 +193,7 @@ implementation yet.
 | `src/reconcile/sink.rs` | The `RemoteSink` trait: upload and delete | done |
 | `src/reconcile/local.rs` | Pushing one local path: upload, delete, or decide it is unchanged | done |
 | `src/reconcile/apply.rs` | Applying one entry: download, mkdir, delete subtree | done |
+| `src/reconcile/conflict.rs` | Conflicted-copy naming, and detecting an unsent local edit | done |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |
 | `src/watcher/debounce.rs` | Per-path quiet-period coalescing | done |
 | `src/daemon/mod.rs` | Building the components from config and the startup order | done |

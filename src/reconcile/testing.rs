@@ -26,6 +26,9 @@ pub struct FakeRemote {
     /// Bumped on every upload so each write gets a distinct revision, the way
     /// Dropbox would.
     revision: Mutex<u64>,
+    /// Remote paths whose next `update(rev)` write is refused, the way Dropbox
+    /// refuses one naming a revision that is no longer current.
+    conflicts: Mutex<HashMap<String, usize>>,
 }
 
 impl FakeRemote {
@@ -42,6 +45,14 @@ impl FakeRemote {
     }
 
     /// Queue a page for the next `list_folder` call.
+    /// Make the next `count` updates to `path` fail with a conflict.
+    pub fn refuse_updates(&self, path: &str, count: usize) {
+        self.conflicts
+            .lock()
+            .unwrap()
+            .insert(path.to_lowercase(), count);
+    }
+
     pub fn queue_listing(&self, page: Result<ListFolderPage>) {
         self.listings.lock().unwrap().push_back(page);
     }
@@ -131,6 +142,17 @@ impl RemoteSink for FakeRemote {
         local: &Path,
         mode: &WriteMode,
     ) -> Result<RemoteFile> {
+        if let Some(left) = self
+            .conflicts
+            .lock()
+            .unwrap()
+            .get_mut(&remote_path.to_lowercase())
+            && *left > 0
+            && matches!(mode, WriteMode::Update(_))
+        {
+            *left -= 1;
+            return Err(Error::Conflict);
+        }
         let content = tokio::fs::read(local).await?;
         self.files
             .lock()

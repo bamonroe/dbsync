@@ -9,6 +9,7 @@ use crate::api::{RemoteEntry, RemoteFile};
 use crate::error::{Error, Result};
 use crate::state::{SyncState, entry_for_local_file, key_for};
 
+use super::conflict;
 use super::paths::PathMapper;
 use super::source::RemoteSource;
 
@@ -26,6 +27,9 @@ pub enum Applied {
     Deleted,
     /// Nothing to delete — the path was already gone.
     NothingToDelete,
+    /// The local file had diverged, so it was kept as a conflicted copy and
+    /// the remote version was downloaded over the original.
+    Conflicted,
 }
 
 /// Apply one entry from a listing or change stream.
@@ -56,13 +60,22 @@ async fn apply_file<S: RemoteSource>(
     if is_current(state, file, local) {
         return Ok(Applied::AlreadyCurrent);
     }
+    // Both sides moved: the remote version is about to land on this path, so
+    // the local bytes have to be set aside first or they are gone for good.
+    let conflicted = conflict::has_local_edit(state, &file.path_display, local)?;
+    if conflicted {
+        conflict::preserve(local).await?;
+    }
     source.download_to(&file.path_display, local).await?;
     // Re-describe from disk rather than from the metadata: the hash and mtime
     // must be the ones a local scan will actually see, or the very next scan
     // would read this file as a local edit and upload it straight back.
     let entry = entry_for_local_file(local, &file.path_display, &file.rev)?;
     state.insert(entry);
-    Ok(Applied::Downloaded)
+    Ok(match conflicted {
+        true => Applied::Conflicted,
+        false => Applied::Downloaded,
+    })
 }
 
 /// Would downloading this file be a no-op?
@@ -169,6 +182,41 @@ mod tests {
         fn local(&self, relative: &str) -> std::path::PathBuf {
             self.dir.path().join(relative)
         }
+    }
+
+    /// The download-side conflict: the incoming version would overwrite local
+    /// edits, so the local bytes are kept beside it.
+    #[tokio::test]
+    async fn a_locally_edited_file_is_kept_as_a_conflicted_copy() {
+        let mut fixture = Fixture::new();
+        fixture.remote.put("/a.txt", b"theirs");
+        std::fs::write(fixture.local("a.txt"), b"mine").unwrap();
+
+        assert_eq!(
+            fixture.apply(&file("/a.txt", "r2")).await.unwrap(),
+            Applied::Conflicted
+        );
+        assert_eq!(std::fs::read(fixture.local("a.txt")).unwrap(), b"theirs");
+        assert_eq!(
+            std::fs::read(fixture.local("a (conflicted copy).txt")).unwrap(),
+            b"mine"
+        );
+    }
+
+    /// A file that still matches the state has no local edit to protect, so it
+    /// is a plain update and no copy is made.
+    #[tokio::test]
+    async fn an_untouched_file_is_updated_without_a_copy() {
+        let mut fixture = Fixture::new();
+        fixture.remote.put("/a.txt", b"first");
+        fixture.apply(&file("/a.txt", "r1")).await.unwrap();
+
+        fixture.remote.put("/a.txt", b"second");
+        assert_eq!(
+            fixture.apply(&file("/a.txt", "r2")).await.unwrap(),
+            Applied::Downloaded
+        );
+        assert!(!fixture.local("a (conflicted copy).txt").exists());
     }
 
     #[tokio::test]

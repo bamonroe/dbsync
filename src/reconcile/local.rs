@@ -8,9 +8,10 @@
 use std::path::Path;
 
 use crate::api::WriteMode;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::state::{SyncEntry, SyncState, entry_for_local_file, hash};
 
+use super::conflict;
 use super::paths::PathMapper;
 use super::sink::RemoteSink;
 
@@ -25,6 +26,9 @@ pub enum Pushed {
     Unchanged,
     /// Not a file we sync — a directory, or something outside the root.
     Ignored,
+    /// Dropbox refused the write because the file moved remotely, so the local
+    /// version was kept as a conflicted copy and uploaded under that name.
+    Conflicted,
 }
 
 /// Push whatever is at `local` now: upload, delete, or decide it is unchanged.
@@ -43,7 +47,7 @@ pub async fn push_path<S: RemoteSink>(
         // implicitly when a file inside one is uploaded.
         return Ok(Pushed::Ignored);
     }
-    upload_if_changed(sink, state, &remote, local, &metadata).await
+    upload_if_changed(sink, paths, state, &remote, local, &metadata).await
 }
 
 /// The local metadata, or `None` if the path no longer exists.
@@ -74,6 +78,7 @@ async fn delete_remote<S: RemoteSink>(
 /// Upload the file unless the state says Dropbox already has these bytes.
 async fn upload_if_changed<S: RemoteSink>(
     sink: &S,
+    paths: &PathMapper,
     state: &mut SyncState,
     remote: &str,
     local: &Path,
@@ -103,13 +108,49 @@ async fn upload_if_changed<S: RemoteSink>(
         Some(entry) => WriteMode::Update(entry.rev.clone()),
         None => WriteMode::Add,
     };
-    let uploaded = sink.upload(remote, local, &mode).await?;
+    let uploaded = match sink.upload(remote, local, &mode).await {
+        Ok(uploaded) => uploaded,
+        // The revision we named is stale: the file was edited remotely since we
+        // last saw it. Neither version may be dropped, so both are kept.
+        Err(Error::Conflict) => {
+            return keep_both(sink, paths, state, local, known.as_ref(), metadata).await;
+        }
+        Err(error) => return Err(error),
+    };
     state.insert(entry_for_local_file(
         local,
         &uploaded.path_display,
         &uploaded.rev,
     )?);
     Ok(Pushed::Uploaded)
+}
+
+/// Keep the local version beside the remote one under a conflicted-copy name.
+///
+/// The original path is deliberately left alone: the remote version belongs
+/// there, and the next pull puts it there. Re-stamping the original's state
+/// entry with what is on disk now is what stops the watcher from pushing the
+/// same losing write again and conflicting forever.
+async fn keep_both<S: RemoteSink>(
+    sink: &S,
+    paths: &PathMapper,
+    state: &mut SyncState,
+    local: &Path,
+    known: Option<&SyncEntry>,
+    metadata: &std::fs::Metadata,
+) -> Result<Pushed> {
+    let copy = conflict::preserve(local).await?;
+    let remote_copy = paths.to_remote(&copy)?;
+    let uploaded = sink.upload(&remote_copy, &copy, &WriteMode::Add).await?;
+    state.insert(entry_for_local_file(
+        &copy,
+        &uploaded.path_display,
+        &uploaded.rev,
+    )?);
+    if let Some(entry) = known {
+        state.insert(refreshed(entry, metadata));
+    }
+    Ok(Pushed::Conflicted)
 }
 
 /// Does the cheap metadata check say nothing happened?
@@ -239,6 +280,42 @@ mod tests {
                 .unwrap()
                 .metadata_matches(metadata.len(), metadata.modified().unwrap())
         );
+    }
+
+    /// The conflict path: Dropbox refuses the write, so our version is kept
+    /// beside the remote one instead of either being lost.
+    #[tokio::test]
+    async fn a_refused_write_becomes_a_conflicted_copy() {
+        let mut fixture = Fixture::new();
+        fixture.write("a.txt", b"hello");
+        fixture.push("a.txt").await.unwrap();
+        fixture.remote.refuse_updates("/a.txt", 1);
+
+        fixture.write("a.txt", b"my version");
+        assert_eq!(fixture.push("a.txt").await.unwrap(), Pushed::Conflicted);
+
+        // Our bytes went up under the conflicted name...
+        assert_eq!(
+            fixture.remote.content("/a (conflicted copy).txt").unwrap(),
+            b"my version"
+        );
+        // ...and the original is still on disk for the next pull to replace.
+        assert!(fixture.dir.path().join("a.txt").exists());
+        assert!(fixture.state.get("/a (conflicted copy).txt").is_some());
+    }
+
+    /// Without re-stamping the original, the same losing write would be
+    /// retried on every watcher event.
+    #[tokio::test]
+    async fn a_conflict_is_not_retried_forever() {
+        let mut fixture = Fixture::new();
+        fixture.write("a.txt", b"hello");
+        fixture.push("a.txt").await.unwrap();
+        fixture.remote.refuse_updates("/a.txt", 5);
+        fixture.write("a.txt", b"my version");
+        fixture.push("a.txt").await.unwrap();
+
+        assert_eq!(fixture.push("a.txt").await.unwrap(), Pushed::Unchanged);
     }
 
     #[tokio::test]

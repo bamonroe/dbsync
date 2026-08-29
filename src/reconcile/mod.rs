@@ -22,6 +22,7 @@
 //!   state, so the watcher event it caused does not become an upload.
 
 mod apply;
+mod conflict;
 mod local;
 mod paths;
 mod sink;
@@ -30,6 +31,7 @@ mod source;
 pub(crate) mod testing;
 
 pub use apply::Applied;
+pub use conflict::conflicted_path;
 pub use local::Pushed;
 pub use paths::PathMapper;
 pub use sink::RemoteSink;
@@ -58,6 +60,8 @@ pub struct Push {
     pub uploaded: usize,
     /// How many remote copies were deleted.
     pub deleted: usize,
+    /// How many paths Dropbox refused, and so became conflicted copies.
+    pub conflicted: usize,
 }
 
 /// Applies changes in both directions, and owns the state between them.
@@ -186,6 +190,10 @@ impl<S: RemoteSource + RemoteSink> Reconciler<S> {
                 }
                 Ok(Pushed::Deleted) => {
                     push.deleted += 1;
+                    changed = true;
+                }
+                Ok(Pushed::Conflicted) => {
+                    push.conflicted += 1;
                     changed = true;
                 }
                 Ok(_) => {}

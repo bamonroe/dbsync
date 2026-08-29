@@ -31,6 +31,12 @@ pub enum Error {
     #[error("folder cursor was reset by Dropbox")]
     CursorReset,
 
+    /// Dropbox refused a write because the revision we named is no longer the
+    /// current one: someone else edited the file. The caller must keep both
+    /// versions — see `src/reconcile/conflict.rs`.
+    #[error("Dropbox refused the write: the file changed remotely")]
+    Conflict,
+
     /// Dropbox asked us to slow down; wait this long before retrying.
     #[error("rate limited; retry after {0}s")]
     RateLimited(u64),

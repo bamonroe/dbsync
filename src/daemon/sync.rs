@@ -101,6 +101,7 @@ async fn push<S: RemoteSource + RemoteSink>(reconciler: &mut Reconciler<S>, batc
         Ok(push) => tracing::info!(
             uploaded = push.uploaded,
             deleted = push.deleted,
+            conflicted = push.conflicted,
             "pushed local changes"
         ),
         Err(error) => tracing::warn!(%error, "push failed"),

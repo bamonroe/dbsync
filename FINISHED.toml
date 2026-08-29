@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "implement-conflict-handling"
+title = "Implement conflict handling"
+description = "Divergent local and remote edits must produce a 'filename (conflicted copy).ext' next to the original rather than overwriting either side."
+status = "finished"
+level = "task"
+category = "feature"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["sync"]
+
+[[task]]
 id = "wire-the-daemon-long-poll-loop-plus-remote-applier"
 title = "Wire the daemon: long-poll loop plus remote applier"
 description = "src/daemon.rs is still a stub. Build the ApiClient and RemoteApplier from Config, run an initial pull to get a cursor, feed that cursor to notify::channel, and translate RemoteEvent into pull() calls, republishing each new cursor through the CursorHandle. Handle SIGINT/SIGTERM by dropping the event receiver."
