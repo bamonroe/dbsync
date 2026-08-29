@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "add-an-end-to-end-sync-test-against-a-dropbox-test-account"
-title = "Add an end-to-end sync test against a Dropbox test account"
-description = "Prove the round trip: local write appears remotely, remote write appears locally via long-poll within seconds, and a deliberate divergence produces a conflicted copy."
-status = "active"
-level = "task"
-category = "test"
-urgency = "normal"
-order = 100
-created = 2026-08-29
-tags = ["test"]
-
-[[task]]
 id = "add-a-config-drift-test-between-config-rs-and-config-example-toml"
 title = "Add a config drift test between config.rs and config.example.toml"
 description = "CLAUDE.md requires code-derived docs to be mechanically checked. Fail the build when config.example.toml gains or loses a key relative to the Config struct."

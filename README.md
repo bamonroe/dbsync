@@ -102,3 +102,37 @@ cargo test                                                        # tests
 
 Conventions, standing preferences, and the documentation map live in
 [`CLAUDE.md`](CLAUDE.md).
+
+### Live sync tests
+
+`tests/live_sync.rs` proves the round trip against a **real Dropbox account**: a
+local write reaches Dropbox, a remote write comes back down and it is the
+long-poll endpoint that announces it, and edits on both sides leave a conflicted
+copy. Everything else is covered against an in-memory fake, so these three are
+the only tests that need the network.
+
+They **skip themselves** when the environment has no account — `cargo test` on a
+fresh checkout passes without one, printing a `skipping live sync test …` line
+per test so you can tell they did not run.
+
+To run them, use a **throwaway Dropbox account** (the tests create and delete
+folders in it) and export:
+
+| Variable                    | Meaning                                                  |
+|-----------------------------|----------------------------------------------------------|
+| `DBSYNC_TEST_APP_KEY`       | App key of a Dropbox app, as in [Configure](#configure). |
+| `DBSYNC_TEST_REFRESH_TOKEN` | A refresh token for the test account (required).         |
+| `DBSYNC_TEST_REMOTE_ROOT`   | Folder to work under. Optional; defaults to `/dbsync-test`. |
+
+Get the refresh token by linking the test account once with `dbsync auth login`
+and reading it out of the credentials file that step writes (its path is printed
+by `dbsync auth status`). Treat it as a password — it does not expire.
+
+```sh
+export DBSYNC_TEST_APP_KEY=… DBSYNC_TEST_REFRESH_TOKEN=…
+cargo test --test live_sync -- --nocapture
+```
+
+Each test works inside its own uniquely-named folder and deletes it afterwards,
+so a shared account tolerates concurrent runs; a run killed mid-test can leave a
+stray `…-<hex>` folder behind to sweep by hand.
