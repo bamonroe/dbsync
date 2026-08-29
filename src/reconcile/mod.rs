@@ -4,27 +4,35 @@
 //! remote and local sides at once, and so conflicts produce a
 //! `filename (conflicted copy).ext` rather than destroying either version.
 //!
-//! This module currently implements the **remote-to-local** direction. A
-//! [`crate::notify::RemoteEvent::Changed`] signal turns into a
-//! [`RemoteApplier::pull`]: drain `list_folder/continue`, apply every entry to
-//! disk, and persist the new cursor. The local direction is still a stub — see
-//! `TODO.toml`.
+//! [`Reconciler`] owns both directions and the state database between them:
 //!
-//! Two rules from `docs/architecture.md` are enforced here:
+//! - [`Reconciler::pull`] answers a [`crate::notify::RemoteEvent::Changed`] by
+//!   draining `list_folder/continue`, applying every entry to disk, and
+//!   persisting the new cursor.
+//! - [`Reconciler::push`] answers a batch from [`crate::watcher`] by uploading
+//!   or deleting each local path that actually changed.
+//!
+//! Three rules from `docs/architecture.md` are enforced here:
 //!
 //! - **The cursor is only advanced after the page it describes has been
 //!   applied**, so a crash re-delivers work rather than skipping it.
 //! - **A cursor reset is routine**: drop the cursor, re-list, and reconcile
 //!   against local state instead of re-downloading the world.
+//! - **The state breaks the echo loop**: a file we just downloaded matches the
+//!   state, so the watcher event it caused does not become an upload.
 
 mod apply;
+mod local;
 mod paths;
+mod sink;
 mod source;
 #[cfg(test)]
 mod testing;
 
 pub use apply::Applied;
+pub use local::Pushed;
 pub use paths::PathMapper;
+pub use sink::RemoteSink;
 pub use source::RemoteSource;
 
 use std::collections::HashSet;
@@ -43,15 +51,24 @@ pub struct Pull {
     pub resynced: bool,
 }
 
-/// Applies remote changes to the local directory.
-pub struct RemoteApplier<S> {
+/// What one push did, tallied across a batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Push {
+    /// How many files were uploaded.
+    pub uploaded: usize,
+    /// How many remote copies were deleted.
+    pub deleted: usize,
+}
+
+/// Applies changes in both directions, and owns the state between them.
+pub struct Reconciler<S> {
     source: S,
     paths: PathMapper,
     db: StateDb,
     state: SyncState,
 }
 
-impl<S: RemoteSource> RemoteApplier<S> {
+impl<S: RemoteSource + RemoteSink> Reconciler<S> {
     pub fn new(source: S, paths: PathMapper, db: StateDb, state: SyncState) -> Self {
         Self {
             source,
@@ -154,6 +171,35 @@ impl<S: RemoteSource> RemoteApplier<S> {
         Ok(applied)
     }
 
+    /// Push a batch of local paths, in the order the watcher settled them.
+    ///
+    /// One failing path is logged and stepped over: a file that vanished
+    /// mid-batch, or one the user cannot read, must not stop the rest.
+    pub async fn push(&mut self, batch: &[std::path::PathBuf]) -> Result<Push> {
+        let mut push = Push::default();
+        let mut changed = false;
+        for local in batch {
+            match local::push_path(&self.source, &self.paths, &mut self.state, local).await {
+                Ok(Pushed::Uploaded) => {
+                    push.uploaded += 1;
+                    changed = true;
+                }
+                Ok(Pushed::Deleted) => {
+                    push.deleted += 1;
+                    changed = true;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(path = %local.display(), %error, "could not push local change")
+                }
+            }
+        }
+        if changed {
+            self.db.save(&self.state)?;
+        }
+        Ok(push)
+    }
+
     /// Delete local files that the full listing did not mention.
     async fn drop_vanished(&mut self, seen: &HashSet<String>) -> Result<usize> {
         let vanished: Vec<String> = self
@@ -209,7 +255,7 @@ mod tests {
 
     struct Fixture {
         dir: tempfile::TempDir,
-        applier: RemoteApplier<FakeRemote>,
+        applier: Reconciler<FakeRemote>,
     }
 
     impl Fixture {
@@ -225,7 +271,7 @@ mod tests {
             let paths = PathMapper::new(dir.path().join("root"), "");
             std::fs::create_dir_all(dir.path().join("root")).unwrap();
             Self {
-                applier: RemoteApplier::new(FakeRemote::new(), paths, db, state),
+                applier: Reconciler::new(FakeRemote::new(), paths, db, state),
                 dir,
             }
         }
@@ -383,6 +429,75 @@ mod tests {
         assert!(fixture.local("a.txt").exists());
         assert!(!fixture.local("b.txt").exists());
         assert!(fixture.applier.state().get("/b.txt").is_none());
+    }
+
+    /// The echo loop, end to end: a file we just pulled must not be pushed
+    /// straight back up when the watcher notices it landing.
+    #[tokio::test]
+    async fn a_pulled_file_is_not_pushed_back() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/a.txt", b"a");
+        fixture
+            .remote()
+            .queue_continue(page(vec![file("/a.txt", "r1")], "c1", false));
+        fixture.applier.pull().await.unwrap();
+
+        let push = fixture
+            .applier
+            .push(&[fixture.local("a.txt")])
+            .await
+            .unwrap();
+        assert_eq!(push, Push::default());
+        assert_eq!(fixture.remote().uploads(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_batch_uploads_new_files_and_deletes_removed_ones() {
+        let mut fixture = Fixture::new(Some("c0"));
+        std::fs::write(fixture.local("new.txt"), b"new").unwrap();
+        let push = fixture
+            .applier
+            .push(&[fixture.local("new.txt")])
+            .await
+            .unwrap();
+        assert_eq!(push.uploaded, 1);
+
+        std::fs::remove_file(fixture.local("new.txt")).unwrap();
+        let push = fixture
+            .applier
+            .push(&[fixture.local("new.txt")])
+            .await
+            .unwrap();
+        assert_eq!(push.deleted, 1);
+        assert!(fixture.remote().content("/new.txt").is_none());
+    }
+
+    /// A push must persist the state, or a restart would re-upload everything.
+    #[tokio::test]
+    async fn a_push_persists_the_state() {
+        let mut fixture = Fixture::new(Some("c0"));
+        std::fs::write(fixture.local("new.txt"), b"new").unwrap();
+        fixture
+            .applier
+            .push(&[fixture.local("new.txt")])
+            .await
+            .unwrap();
+
+        let db = StateDb::at(fixture.dir.path().join("state.json"));
+        assert!(db.load().unwrap().get("/new.txt").is_some());
+    }
+
+    /// One bad path in a batch must not stop the ones after it.
+    #[tokio::test]
+    async fn a_failing_path_does_not_stop_the_batch() {
+        let mut fixture = Fixture::new(Some("c0"));
+        std::fs::write(fixture.local("good.txt"), b"good").unwrap();
+        let batch = vec![
+            std::path::PathBuf::from("/etc/passwd"),
+            fixture.local("good.txt"),
+        ];
+
+        assert_eq!(fixture.applier.push(&batch).await.unwrap().uploaded, 1);
     }
 
     /// One unapplicable entry must not stall the stream behind it.

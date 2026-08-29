@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "implement-local-to-remote-upload-via-inotify"
-title = "Implement local-to-remote upload via inotify"
-description = "The 'watcher' module plus upload path: subscribe to inotify, debounce and coalesce events, and upload through /files/upload or an upload session for large files."
-status = "active"
-level = "task"
-category = "feature"
-urgency = "high"
-order = 80
-created = 2026-08-29
-tags = ["sync"]
-
-[[task]]
 id = "implement-conflict-handling"
 title = "Implement conflict handling"
 description = "Divergent local and remote edits must produce a 'filename (conflicted copy).ext' next to the original rather than overwriting either side."

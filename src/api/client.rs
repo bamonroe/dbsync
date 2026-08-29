@@ -94,6 +94,48 @@ impl ApiClient {
         }
     }
 
+    /// A content request that carries bytes up: the argument travels in a
+    /// header and the body is the file content.
+    ///
+    /// Returns the raw response: some session endpoints answer with a file
+    /// metadata document and others with an empty body.
+    pub(super) async fn content_upload<Arg: Serialize>(
+        &self,
+        endpoint: &str,
+        arg: &Arg,
+        body: Vec<u8>,
+    ) -> Result<reqwest::Response> {
+        let url = format!("{CONTENT_HOST}/{endpoint}");
+        let arg = serde_json::to_string(arg).map_err(|error| Error::Config(error.to_string()))?;
+        let token = self.tokens.access_token().await?;
+        match self.send_upload(&url, &arg, body.clone(), token).await {
+            Err(Error::Unauthorized) => {
+                let token = self.tokens.force_refresh().await?;
+                self.send_upload(&url, &arg, body, token).await
+            }
+            other => other,
+        }
+    }
+
+    async fn send_upload(
+        &self,
+        url: &str,
+        arg: &str,
+        body: Vec<u8>,
+        token: String,
+    ) -> Result<reqwest::Response> {
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .header("Dropbox-API-Arg", arg)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(body)
+            .send()
+            .await?;
+        check(response).await
+    }
+
     async fn send_download(
         &self,
         url: &str,

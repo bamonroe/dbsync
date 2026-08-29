@@ -71,7 +71,7 @@ component allowed to write it.
 
 ### Remote-to-local application
 
-`RemoteApplier::pull` is what a `Changed` signal turns into. It drains
+`Reconciler::pull` is what a `Changed` signal turns into. It drains
 `list_folder/continue` until `has_more` is false, applying each entry as it goes:
 
 - **File** — downloaded, unless the state already holds that `rev` *and* the file is still on
@@ -93,6 +93,28 @@ Three rules hold the whole thing together:
 - **Paths from Dropbox are untrusted.** `PathMapper` refuses any path that would escape the
   sync root rather than clamping it, and one unapplicable entry is logged and stepped over
   rather than stalling the stream behind it.
+
+### Local-to-remote upload
+
+`watcher::watch` subscribes to inotify recursively and emits a batch of paths once each has
+been quiet for `watcher.debounce_ms`. Debouncing is not cosmetic: one editor save is a
+create, several writes, a rename, and a chmod, and uploading each would race with itself.
+Our own partial downloads and the state database are filtered out before anything is emitted.
+
+`Reconciler::push` then decides, per path, what actually happened:
+
+- **Gone** — the remote copy is deleted, but only for a path the state was tracking. An
+  unknown path that does not exist is nothing at all, not a deletion.
+- **Metadata matches the state** — nothing happened; no upload, no hashing.
+- **Metadata moved but the content hash did not** — a rewrite with identical bytes. The entry
+  is re-stamped so the next check is cheap again, and nothing is uploaded.
+- **Genuinely changed** — uploaded, single-shot below `SESSION_THRESHOLD` and as a chunked
+  upload session above it.
+
+Uploads are sent with `autorename: false` and, for a file we already know, `mode: update(rev)`
+naming the revision we believe we are replacing. Dropbox therefore *refuses* a write that
+would clobber a remote edit we have not seen yet, rather than silently winning. Handling that
+refusal — the conflicted-copy path — is the conflict task in `TODO.toml`.
 
 ## Repository layout
 
@@ -122,11 +144,15 @@ implementation yet.
 | `src/api/metadata.rs` | The `.tag`-tagged file/folder/tombstone shapes | done |
 | `src/api/list_folder.rs` | `list_folder` and `list_folder/continue` | done |
 | `src/api/download.rs` | Streaming download with an atomic rename into place | done |
-| `src/reconcile/mod.rs` | `RemoteApplier`: drains the change stream, advances the cursor | remote direction done |
+| `src/api/upload.rs` | `files/upload`, chunked upload sessions, and delete | done |
+| `src/reconcile/mod.rs` | `Reconciler`: both directions, owning the state between them | done |
 | `src/reconcile/paths.rs` | Dropbox path ⇄ local path, with traversal refused | done |
 | `src/reconcile/source.rs` | The `RemoteSource` trait the applier is written against | done |
+| `src/reconcile/sink.rs` | The `RemoteSink` trait: upload and delete | done |
+| `src/reconcile/local.rs` | Pushing one local path: upload, delete, or decide it is unchanged | done |
 | `src/reconcile/apply.rs` | Applying one entry: download, mkdir, delete subtree | done |
-| `src/watcher.rs` | inotify subscription plus debounce/coalescing | stub |
+| `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |
+| `src/watcher/debounce.rs` | Per-path quiet-period coalescing | done |
 | `src/daemon.rs` | Process lifecycle, signals, wiring the above together | stub |
 
 The `notify` crate (inotify bindings) is renamed to `notify_fs` in `Cargo.toml`, because the

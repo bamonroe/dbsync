@@ -13,7 +13,9 @@ mod client;
 mod download;
 mod list_folder;
 mod metadata;
+mod upload;
 
 pub use client::ApiClient;
 pub use download::is_partial;
 pub use metadata::{ListFolderPage, RemoteDeleted, RemoteEntry, RemoteFile, RemoteFolder};
+pub use upload::{CHUNK_SIZE, SESSION_THRESHOLD, WriteMode};

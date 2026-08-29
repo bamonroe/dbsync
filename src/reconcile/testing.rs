@@ -4,9 +4,10 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::api::ListFolderPage;
+use crate::api::{ListFolderPage, RemoteFile, WriteMode};
 use crate::error::{Error, Result};
 
+use super::sink::RemoteSink;
 use super::source::RemoteSource;
 
 /// An in-memory stand-in for the remote side.
@@ -20,6 +21,11 @@ pub struct FakeRemote {
     continues: Mutex<VecDeque<Result<ListFolderPage>>>,
     downloads: Mutex<usize>,
     cursors_used: Mutex<Vec<String>>,
+    uploads: Mutex<Vec<WriteMode>>,
+    deletes: Mutex<usize>,
+    /// Bumped on every upload so each write gets a distinct revision, the way
+    /// Dropbox would.
+    revision: Mutex<u64>,
 }
 
 impl FakeRemote {
@@ -48,6 +54,28 @@ impl FakeRemote {
     /// How many downloads have been served — the check for "did it skip?".
     pub fn downloads(&self) -> usize {
         *self.downloads.lock().unwrap()
+    }
+
+    /// What a path holds in the fake account, if anything.
+    pub fn content(&self, path: &str) -> Option<Vec<u8>> {
+        self.files
+            .lock()
+            .unwrap()
+            .get(&path.to_lowercase())
+            .cloned()
+    }
+
+    /// The write mode of each upload, in order.
+    pub fn modes(&self) -> Vec<WriteMode> {
+        self.uploads.lock().unwrap().clone()
+    }
+
+    pub fn uploads(&self) -> usize {
+        self.uploads.lock().unwrap().len()
+    }
+
+    pub fn deletes(&self) -> usize {
+        *self.deletes.lock().unwrap()
     }
 
     /// Every cursor `continue` was called with, in order.
@@ -92,6 +120,43 @@ impl RemoteSource for FakeRemote {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(dest, &content).await?;
+        Ok(())
+    }
+}
+
+impl RemoteSink for FakeRemote {
+    async fn upload(
+        &self,
+        remote_path: &str,
+        local: &Path,
+        mode: &WriteMode,
+    ) -> Result<RemoteFile> {
+        let content = tokio::fs::read(local).await?;
+        self.files
+            .lock()
+            .unwrap()
+            .insert(remote_path.to_lowercase(), content.clone());
+        self.uploads.lock().unwrap().push(mode.clone());
+        let rev = {
+            let mut revision = self.revision.lock().unwrap();
+            *revision += 1;
+            format!("r{revision}")
+        };
+        Ok(RemoteFile {
+            path_lower: remote_path.to_lowercase(),
+            path_display: remote_path.to_string(),
+            rev,
+            size: content.len() as u64,
+            content_hash: Some(crate::state::hash::hash_bytes(&content)),
+        })
+    }
+
+    async fn delete(&self, remote_path: &str) -> Result<()> {
+        self.files
+            .lock()
+            .unwrap()
+            .remove(&remote_path.to_lowercase());
+        *self.deletes.lock().unwrap() += 1;
         Ok(())
     }
 }
