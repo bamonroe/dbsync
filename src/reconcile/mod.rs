@@ -27,6 +27,7 @@ mod local;
 mod paths;
 mod sink;
 mod source;
+pub mod sweep;
 #[cfg(test)]
 pub(crate) mod testing;
 

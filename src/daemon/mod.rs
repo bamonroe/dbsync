@@ -6,6 +6,8 @@
 //!
 //! The startup order is load-bearing:
 //!
+//! 0. **Sweep leftover partial downloads**, which is only safe here: once the
+//!    pull starts, an in-flight partial is indistinguishable from an orphan.
 //! 1. **Pull first**, before anything is watched. A first run has no cursor, so
 //!    this is the full listing that produces one; a later run applies whatever
 //!    changed while the daemon was down. Either way it ends with a cursor.
@@ -29,13 +31,22 @@ use crate::auth::{OauthClient, TokenProvider, TokenStore};
 use crate::config::Config;
 use crate::error::Result;
 use crate::notify::{self, LongpollClient};
-use crate::reconcile::{PathMapper, Reconciler};
+use crate::reconcile::{self, PathMapper, Reconciler};
 use crate::state::StateDb;
 use crate::watcher;
 
 /// Run the sync daemon until a termination signal arrives.
 pub async fn run(config: &Config) -> Result<Summary> {
     let mut reconciler = build(config)?;
+
+    // Before the pull, while nothing is downloading: a partial being written
+    // right now looks exactly like one abandoned by a kill.
+    match reconcile::sweep::partial_downloads(&config.local_root) {
+        Ok(0) => {}
+        Ok(swept) => tracing::info!(swept, "removed leftover partial downloads"),
+        // Scratch files left behind are not worth refusing to start over.
+        Err(error) => tracing::warn!(%error, "could not sweep partial downloads"),
+    }
 
     tracing::info!(root = %config.local_root.display(), "starting initial pull");
     let first = reconciler.pull().await?;
