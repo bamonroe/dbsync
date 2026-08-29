@@ -17,6 +17,27 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "rework-checkpointing-for-out-of-order-completion"
+title = "Rework checkpointing for out-of-order completion"
+description = """
+The durability half of [download-files-in-parallel-under-a-byte-budget], and the part most likely to corrupt state if it is got wrong. Must land WITH the parallel wiring, not after it.
+
+Today is_checkpoint(applied) (src/reconcile/mod.rs:55) counts a strictly increasing sequential tally, and set_cursor happens once the loop has walked every entry. Both assumptions break under concurrency:
+
+  - the counter no longer means a prefix. With out-of-order completion, "100 applied" can mean entries 1-99 and 140 landed, so a crash-and-resume that trusts it would skip 100-139. Interim saves are still safe (they only ever add entries that really are on disk, and they never touch the cursor) but the INTERVAL must be driven by completed count while the CURSOR must be driven by a full-page barrier.
+  - the cursor may only advance once EVERY entry in the page has finished. This is the rule from commit 290d540 and docs/architecture.md, and under parallelism it stops being free: a pages slowest file now gates the whole pages advance. That is the correct trade -- advancing early loses changes permanently, re-applying a page is harmless.
+
+So: keep interim saves on a completed-count interval, and gate set_cursor plus its save on the page barrier. Do not try to advance the cursor to a partial watermark; Dropbox cursors are opaque and cannot be positioned mid-page.
+
+Update the apply_page doc comment, which currently explains the ordering in terms of a sequential loop, and docs/architecture.md alongside it. Extend entries_are_checkpointed_within_a_long_page to a page that completes out of order, and add a case pinning that the cursor is NOT advanced when one entry in the page fails to complete."""
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["download", "correctness"]
+
+[[task]]
 id = "run-the-parallel-track-under-the-byte-budget"
 title = "Run the parallel track under the byte budget"
 description = """

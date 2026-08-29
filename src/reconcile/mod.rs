@@ -397,25 +397,49 @@ mod tests {
     /// A page bigger than the checkpoint interval must persist entries as it
     /// goes. Without interim saves an interrupt part-way through a huge first
     /// listing loses every entry applied so far and re-downloads them all.
+    ///
+    /// The page here completes out of order — the listing's first file is held
+    /// back until every other has landed — which is the case the two halves of
+    /// checkpointing have to be driven differently for. The interval counts
+    /// *completions*, which under concurrency is no longer a prefix of the
+    /// page; the cursor waits for the page barrier instead.
     #[tokio::test]
     async fn entries_are_checkpointed_within_a_long_page() {
+        let count = page::CHECKPOINT_EVERY + 5;
         let mut fixture = Fixture::new(Some("c0"));
-        let entries: Vec<_> = (0..page::CHECKPOINT_EVERY + 5)
-            .map(|i| {
-                let path = format!("/f{i}.txt");
-                fixture.remote().put(&path, b"x");
-                file(&path, "r1")
-            })
-            .collect();
+        let entries = fixture.stage_files(count);
+        fixture.remote().stall("/f0.txt", count);
         fixture.remote().queue_continue(page(entries, "c1", false));
 
         fixture.applier.pull().await.unwrap();
 
+        assert_eq!(fixture.remote().completed().last().unwrap(), "/f0.txt");
         let saved = StateDb::at(fixture.dir.path().join("state.json"))
             .load()
             .unwrap();
-        assert_eq!(saved.len(), page::CHECKPOINT_EVERY + 5);
+        assert_eq!(saved.len(), count);
         assert_eq!(saved.cursor(), Some("c1"));
+    }
+
+    /// The page barrier from the failing side: a page that cannot be applied
+    /// through to the end must leave the cursor exactly where it was, so the
+    /// whole page is re-delivered rather than skipped. Here the mid-page
+    /// checkpoint cannot be written, which aborts the page part-way.
+    ///
+    /// This is the *page* failing, not one entry — a single unapplicable entry
+    /// is logged and stepped over, and the cursor does still advance past it
+    /// (see `a_failing_entry_does_not_block_the_rest_of_the_page`).
+    #[tokio::test]
+    async fn a_page_that_cannot_be_finished_leaves_the_cursor_alone() {
+        let mut fixture = Fixture::new(Some("c0"));
+        let entries = fixture.stage_files(page::CHECKPOINT_EVERY + 5);
+        fixture.remote().queue_continue(page(entries, "c1", false));
+        // A directory where the state file belongs: every save fails, so the
+        // first interim checkpoint takes the page down with it.
+        std::fs::create_dir(fixture.dir.path().join("state.json")).unwrap();
+
+        assert!(fixture.applier.pull().await.is_err());
+        assert_eq!(fixture.applier.cursor(), Some("c0"));
     }
 
     /// A page of independent files must overlap its downloads rather than

@@ -23,6 +23,11 @@ pub struct FakeRemote {
     /// Downloads currently being served, and the most there have ever been at
     /// once — how a test sees that fetches really did overlap.
     in_flight: Mutex<(usize, usize)>,
+    /// Extra yields to make a named path wait for before it is served, so a
+    /// test can force a page to complete in an order other than its listing's.
+    stalls: Mutex<HashMap<String, usize>>,
+    /// Every download that finished, in completion order.
+    completed: Mutex<Vec<String>>,
     cursors_used: Mutex<Vec<String>>,
     uploads: Mutex<Vec<WriteMode>>,
     deletes: Mutex<usize>,
@@ -73,6 +78,20 @@ impl FakeRemote {
     /// The most downloads that were ever in flight at one time.
     pub fn peak_in_flight(&self) -> usize {
         self.in_flight.lock().unwrap().1
+    }
+
+    /// Hold downloads of `path` back for `rounds` extra yields, so it finishes
+    /// after files listed behind it.
+    pub fn stall(&self, path: &str, rounds: usize) {
+        self.stalls
+            .lock()
+            .unwrap()
+            .insert(path.to_lowercase(), rounds);
+    }
+
+    /// Which downloads finished, in the order they actually finished.
+    pub fn completed(&self) -> Vec<String> {
+        self.completed.lock().unwrap().clone()
     }
 
     /// What a path holds in the fake account, if anything.
@@ -144,11 +163,22 @@ impl RemoteSource for FakeRemote {
         // the next one is polled, so a fake account would look sequential
         // however concurrent the caller is.
         tokio::task::yield_now().await;
+        let stall = self
+            .stalls
+            .lock()
+            .unwrap()
+            .get(&remote_path.to_lowercase())
+            .copied()
+            .unwrap_or(0);
+        for _ in 0..stall {
+            tokio::task::yield_now().await;
+        }
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(dest, &content).await?;
         self.in_flight.lock().unwrap().0 -= 1;
+        self.completed.lock().unwrap().push(remote_path.to_string());
         Ok(())
     }
 }
