@@ -21,13 +21,25 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "resume-an-interrupted-initial-pull-instead-of-re-listing"
-title = "Resume an interrupted initial pull instead of re-listing"
-description = "The cursor is persisted before any file entries are, so a first pull that is killed part-way leaves state.json holding a valid cursor with entries={}. That is indistinguishable from a fresh start, so the next run does a full re-list and re-downloads everything. Observed live: the initial pull was interrupted twice and re-listed from scratch both times. Harmless on a small account, expensive on a large one. Fix so an interrupted pull resumes from what it already has."
+id = "sweep-orphaned-dbsync-partial-files"
+title = "Sweep orphaned .dbsync-partial files"
+description = "download_to removes its partial file when a download errors, but a hard kill leaves it on disk forever. Nothing ever sweeps them, so they accumulate silently in the synced tree — invisible to sync (the watcher filters them via is_partial) but real bytes. Add a cleanup pass, most naturally at startup before the initial pull."
 status = "active"
 level = "task"
 category = "bug"
-urgency = "normal"
-order = 10
+urgency = "low"
+order = 20
 created = 2026-08-29
-tags = ["sync", "state"]
+tags = ["sync"]
+
+[[task]]
+id = "resume-an-interrupted-download-with-a-range-request"
+title = "Resume an interrupted download with a Range request"
+description = "download_to deletes its partial file on error and re-fetches from byte zero next time. For a large file on a flaky link that can mean never finishing. Keep the partial and re-request with an HTTP Range header, validating the remote rev is unchanged before trusting the prefix."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "low"
+order = 30
+created = 2026-08-29
+tags = ["sync"]
