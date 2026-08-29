@@ -75,20 +75,24 @@ impl ApiClient {
 
     /// A GET-style content request: the argument travels in a header, and the
     /// body is the file. Returns the streaming response for the caller to drain.
-    pub(super) async fn content_download<Arg: Serialize>(
+    /// When `resume_from` is set, asks only for the bytes from that offset
+    /// onwards — continuing an interrupted download rather than re-fetching
+    /// what is already on disk.
+    pub(super) async fn content_download_from<Arg: Serialize>(
         &self,
         endpoint: &str,
         arg: &Arg,
+        resume_from: Option<u64>,
     ) -> Result<reqwest::Response> {
         let url = format!("{CONTENT_HOST}/{endpoint}");
         let arg = serde_json::to_string(arg).map_err(|error| Error::Config(error.to_string()))?;
         match self
-            .send_download(&url, &arg, self.tokens.access_token().await?)
+            .send_download(&url, &arg, self.tokens.access_token().await?, resume_from)
             .await
         {
             Err(Error::Unauthorized) => {
                 let token = self.tokens.force_refresh().await?;
-                self.send_download(&url, &arg, token).await
+                self.send_download(&url, &arg, token, resume_from).await
             }
             other => other,
         }
@@ -141,15 +145,18 @@ impl ApiClient {
         url: &str,
         arg: &str,
         token: String,
+        resume_from: Option<u64>,
     ) -> Result<reqwest::Response> {
-        let response = self
+        let mut request = self
             .http
             .post(url)
             .bearer_auth(token)
-            .header("Dropbox-API-Arg", arg)
-            .send()
-            .await?;
-        check(response).await
+            .header("Dropbox-API-Arg", arg);
+        if let Some(offset) = resume_from {
+            // Open-ended: everything from `offset` to the end of the file.
+            request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        }
+        check(request.send().await?).await
     }
 }
 

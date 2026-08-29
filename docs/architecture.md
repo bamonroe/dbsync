@@ -109,6 +109,20 @@ removes its own partial, but a hard kill does not, so `reconcile::sweep::partial
 clears the strays at startup — before the pull, since from then on an in-flight partial and an
 abandoned one look identical.
 
+An interrupted download **resumes** rather than restarting: the partial is kept, and the next
+attempt sends `Range: bytes=<have>-` for the rest. Two things make appending to a prefix safe,
+and both are load-bearing:
+
+- the partial's name carries the **revision** it was fetched from, so a prefix is never
+  extended by a different revision's bytes — a remote edit mid-download simply starts a new
+  partial and leaves the old one for the sweep; and
+- the resumed request addresses that same immutable revision as `rev:<rev>`, not the display
+  path, which would serve whatever is current.
+
+A server that ignores the range answers `200` with the whole body, so the partial is truncated
+rather than appended to. A `416` means the partial is longer than the revision claims and is
+therefore garbage: it is deleted and the download restarts from zero.
+
 `Reconciler::push` then decides, per path, what actually happened:
 
 - **Gone** — the remote copy is deleted, but only for a path the state was tracking. An

@@ -113,7 +113,7 @@ impl RemoteSource for FakeRemote {
         next(&self.continues, "continue")
     }
 
-    async fn download_to(&self, remote_path: &str, dest: &Path) -> Result<()> {
+    async fn download_to(&self, remote_path: &str, _rev: &str, dest: &Path) -> Result<()> {
         let content = self
             .files
             .lock()

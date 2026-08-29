@@ -71,7 +71,9 @@ async fn apply_file<S: RemoteSource>(
     if conflicted {
         conflict::preserve(local).await?;
     }
-    source.download_to(&file.path_display, local).await?;
+    source
+        .download_to(&file.path_display, &file.rev, local)
+        .await?;
     // Re-describe from disk rather than from the metadata: the hash and mtime
     // must be the ones a local scan will actually see, or the very next scan
     // would read this file as a local edit and upload it straight back.

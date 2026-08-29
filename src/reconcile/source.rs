@@ -21,10 +21,12 @@ pub trait RemoteSource {
         cursor: &str,
     ) -> impl Future<Output = Result<ListFolderPage>> + Send;
 
-    /// Download `remote_path`, atomically placing it at `dest`.
+    /// Download revision `rev` of `remote_path`, atomically placing it at
+    /// `dest`. The revision is what makes an interrupted download resumable.
     fn download_to(
         &self,
         remote_path: &str,
+        rev: &str,
         dest: &Path,
     ) -> impl Future<Output = Result<()>> + Send;
 }
@@ -44,8 +46,9 @@ impl RemoteSource for ApiClient {
     fn download_to(
         &self,
         remote_path: &str,
+        rev: &str,
         dest: &Path,
     ) -> impl Future<Output = Result<()>> + Send {
-        ApiClient::download_to(self, remote_path, dest)
+        ApiClient::download_to(self, remote_path, rev, dest)
     }
 }
