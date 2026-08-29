@@ -21,7 +21,9 @@ behind that choice are in [`docs/architecture.md`](docs/architecture.md).
 - Docker (or Podman) — the build and run both happen in a container; no host Rust toolchain
   is needed.
 - A Dropbox app created at <https://www.dropbox.com/developers/apps>, with:
-  - the `files.content.read` and `files.content.write` scopes;
+  - the `files.metadata.read`, `files.content.read` and `files.content.write` scopes —
+    `files.metadata.read` is required for the folder listing and the long-poll endpoint the
+    daemon is built around, so it will not start without it;
   - **Allow public clients (Implicit Grant & PKCE)** enabled — dbsync is a PKCE-only public
     client and Dropbox rejects the authorize request outright without it;
   - `http://localhost:53682` added as a redirect URI — needed only for the browser-redirect
@@ -67,6 +69,10 @@ docker compose run --rm dbsync check
 ## Link your Dropbox account
 
 Two ways in, depending on whether a browser can reach this machine.
+
+Scopes are fixed at the moment the token is granted, so if you change an app's permissions
+later you must re-run `auth login` — an existing refresh token keeps the old, narrower set
+and the daemon fails with a `missing scope` API error.
 
 ### Headless / over SSH — paste the code
 
