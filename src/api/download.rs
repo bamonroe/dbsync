@@ -36,7 +36,17 @@ impl ApiClient {
     /// A failed attempt now *keeps* its partial so the next one can resume;
     /// strays from a hard kill are cleared at startup by
     /// [`crate::reconcile::sweep::partial_downloads`].
-    pub async fn download_to(&self, remote_path: &str, rev: &str, dest: &Path) -> Result<()> {
+    ///
+    /// `size` is the revision's length. Nothing needs it while the whole file
+    /// arrives on one stream, but chunked fetching cannot plan its ranges
+    /// without it, and the caller has had it all along.
+    pub async fn download_to(
+        &self,
+        remote_path: &str,
+        rev: &str,
+        _size: u64,
+        dest: &Path,
+    ) -> Result<()> {
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }

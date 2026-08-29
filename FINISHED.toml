@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "thread-the-remote-file-size-down-into-download-to"
+title = "Thread the remote file size down into download_to"
+description = "Chunking cannot be planned without the total size, and download_to (src/api/download.rs:38) does not receive it. The caller already has it: apply.rs:138 holds the RemoteFile, whose size the byte budget in src/reconcile/budget.rs already spends. Add size to the DownloadSource trait method in src/reconcile/source.rs (both impls, plus the fake in src/reconcile/testing.rs) and pass it through. Pure plumbing, no behaviour change -- land it on its own so the chunking commit stays readable."
+status = "finished"
+level = "task"
+category = "refactor"
+created = 2026-08-29
+completed = 2026-08-29
+tags = []
+
+[[task]]
 id = "ask-for-a-bounded-byte-range-not-just-an-open-ended-resume"
 title = "Ask for a bounded byte range, not just an open-ended resume"
 description = "send_download (src/api/client.rs:148) only ever emits 'bytes={offset}-'. Chunked fetching needs 'bytes={start}-{end}' as well. Replace the resume_from: Option<u64> parameter on send_download / content_download_from with a range type carrying a start and an optional inclusive end, so the existing open-ended resume stays expressible and a bounded chunk becomes a second case rather than a second code path. Verify the response is 206 and that its Content-Range covers exactly the range asked for -- a server answering 200 with the whole body would otherwise be written into one chunk's slot. Unit-test the header the range type renders for both shapes."

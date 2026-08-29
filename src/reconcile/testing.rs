@@ -28,6 +28,9 @@ pub struct FakeRemote {
     stalls: Mutex<HashMap<String, usize>>,
     /// Every download that finished, in completion order.
     completed: Mutex<Vec<String>>,
+    /// The path and expected size of every download, in call order, so a test
+    /// can see the listing's size really reached the fetch.
+    sizes_asked: Mutex<Vec<(String, u64)>>,
     cursors_used: Mutex<Vec<String>>,
     uploads: Mutex<Vec<WriteMode>>,
     deletes: Mutex<usize>,
@@ -121,6 +124,11 @@ impl FakeRemote {
         *self.deletes.lock().unwrap()
     }
 
+    /// The size each download was told to expect, keyed by path in call order.
+    pub fn sizes_asked(&self) -> Vec<(String, u64)> {
+        self.sizes_asked.lock().unwrap().clone()
+    }
+
     /// Every cursor `continue` was called with, in order.
     pub fn cursors_used(&self) -> Vec<String> {
         self.cursors_used.lock().unwrap().clone()
@@ -145,7 +153,17 @@ impl RemoteSource for FakeRemote {
         next(&self.continues, "continue")
     }
 
-    async fn download_to(&self, remote_path: &str, _rev: &str, dest: &Path) -> Result<()> {
+    async fn download_to(
+        &self,
+        remote_path: &str,
+        _rev: &str,
+        size: u64,
+        dest: &Path,
+    ) -> Result<()> {
+        self.sizes_asked
+            .lock()
+            .unwrap()
+            .push((remote_path.to_string(), size));
         let content = self
             .files
             .lock()

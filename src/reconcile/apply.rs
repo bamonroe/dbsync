@@ -135,7 +135,7 @@ pub(crate) async fn fetch<S: RemoteSource>(source: &S, plan: &Plan<'_>) -> Resul
                 conflict::preserve(&plan.local).await?;
             }
             source
-                .download_to(&file.path_display, &file.rev, &plan.local)
+                .download_to(&file.path_display, &file.rev, file.size, &plan.local)
                 .await?;
             Ok(match *preserve {
                 true => Applied::Conflicted,
@@ -311,6 +311,24 @@ mod tests {
             Applied::Downloaded
         );
         assert!(!fixture.local("a (conflicted copy).txt").exists());
+    }
+
+    /// The listing's size has to reach the fetch: a chunked download plans its
+    /// byte ranges from it, and a zero would silently collapse to one request.
+    #[tokio::test]
+    async fn the_listed_size_reaches_the_download() {
+        let mut fixture = Fixture::new();
+        fixture.remote.put("/a.txt", b"hello");
+        let RemoteEntry::File(mut listed) = file("/a.txt", "r1") else {
+            unreachable!()
+        };
+        listed.size = 5;
+
+        fixture.apply(&RemoteEntry::File(listed)).await.unwrap();
+        assert_eq!(
+            fixture.remote.sizes_asked(),
+            vec![("/a.txt".to_string(), 5)]
+        );
     }
 
     #[tokio::test]
