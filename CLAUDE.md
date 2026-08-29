@@ -38,9 +38,16 @@ you pull in a spoke only when the task touches it, instead of reading everything
 
 ## What this project is
 
-**[project-name]** is [one-paragraph description: what it does and for whom]. It is built
-with [stack]. [If it has more than one half — e.g. a server plus an app — name each half
-and how they talk to each other.]
+**dbsync** is a Dropbox sync client for Linux: a long-running daemon that keeps a local
+directory and a Dropbox account in sync, behaving like the native desktop client. Its
+defining choice is that remote changes arrive by **push, not polling** — the daemon parks on
+Dropbox's long-poll notification endpoint and reacts within seconds of a remote change,
+while a local filesystem watcher (inotify) drives the upload direction.
+
+It is built in **Rust** (`tokio` async runtime), and runs as a single binary — there is no
+server half and no public HTTP endpoint (see the webhooks note in `docs/architecture.md`).
+Rust is the house default for long-lived network services here; see the technology defaults
+below.
 
 ## Architecture — see `docs/architecture.md`
 
@@ -56,10 +63,10 @@ The **repository layout** (every package/module and what it does) lives in
 either here.
 
 ```sh
-# The canonical build + check loop for this project (fill in):
-[build command]        # build
-[vet/lint command]     # static checks before committing
-[test command]         # tests
+# The canonical build + check loop for this project:
+cargo build                              # build
+cargo clippy --all-targets -- -D warnings && cargo fmt --check   # static checks
+cargo test                               # tests
 ```
 
 ## External tools & build pipelines — see `docs/tools.md`

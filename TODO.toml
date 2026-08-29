@@ -18,15 +18,112 @@ archive = "FINISHED.toml"
 add_proposed_work = "Add proposed work as a new task rather than losing it."
 remove_dropped_items = "Remove dropped items with a one-line why."
 finish_work = "When a task is fully finished (built, tested, documented), run `scripts/todo.sh done <id>` to move it to FINISHED.toml."
-scope = "[Project scope rule — what is in and out of bounds for this project.]"
+scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "replace-this-example-task"
-title = "Replace this example task"
-description = "Seed entry so the file parses and `scripts/todo.sh list` works from a fresh copy. Delete it (`scripts/todo.sh remove replace-this-example-task`) once the project has real work queued."
+id = "scaffold-the-rust-crate-and-container-build"
+title = "Scaffold the Rust crate and container build"
+description = "Create the cargo workspace, a Dockerfile and compose.yaml so 'docker compose build' works from a fresh checkout, and wire the module skeleton from docs/architecture.md (auth, api, notify, watcher, state, reconcile, daemon)."
 status = "active"
+level = "task"
 category = "chore"
+urgency = "high"
+order = 20
+created = 2026-08-29
+tags = ["build"]
+
+[[task]]
+id = "implement-oauth2-pkce-login-and-token-refresh"
+title = "Implement OAuth2 PKCE login and token refresh"
+description = "The 'auth' module: run the PKCE flow via 'dbsync auth login', persist the refresh token outside the repo, and transparently refresh on 401. No app secret on disk."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "high"
+order = 30
+created = 2026-08-29
+tags = ["auth"]
+
+[[task]]
+id = "implement-the-long-poll-notification-loop"
+title = "Implement the long-poll notification loop"
+description = "The 'notify' module: park on notify.dropboxapi.com/2/files/list_folder/longpoll with the saved cursor, honour the 'backoff' field, reconnect on timeout, and emit a change signal. Separate unauthenticated HTTP client from the API client."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "high"
+order = 40
+created = 2026-08-29
+tags = ["push"]
+
+[[task]]
+id = "implement-the-local-sync-state-database"
+title = "Implement the local sync state database"
+description = "The 'state' module: persist path -> (rev, Dropbox content hash, local mtime, size) plus the folder cursor, atomically, so a crash cannot leave state and disk disagreeing."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "high"
+order = 50
+created = 2026-08-29
+tags = ["state"]
+
+[[task]]
+id = "implement-dropbox-content-hashing"
+title = "Implement Dropbox content hashing"
+description = "The 4 MiB block SHA-256 tree Dropbox uses for content identity. Needed so the daemon recognises the echo of its own upload and does not re-apply it."
+status = "active"
+level = "task"
+category = "feature"
 urgency = "normal"
-order = 10
-created = 1970-01-01
-tags = []
+order = 60
+created = 2026-08-29
+tags = ["state"]
+
+[[task]]
+id = "implement-remote-to-local-application"
+title = "Implement remote-to-local application"
+description = "On a change signal, call /files/list_folder/continue, apply adds/edits/deletes to disk, and advance the cursor. Handle the 409 cursor-reset path by re-listing and reconciling."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "high"
+order = 70
+created = 2026-08-29
+tags = ["sync"]
+
+[[task]]
+id = "implement-local-to-remote-upload-via-inotify"
+title = "Implement local-to-remote upload via inotify"
+description = "The 'watcher' module plus upload path: subscribe to inotify, debounce and coalesce events, and upload through /files/upload or an upload session for large files."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "high"
+order = 80
+created = 2026-08-29
+tags = ["sync"]
+
+[[task]]
+id = "implement-conflict-handling"
+title = "Implement conflict handling"
+description = "Divergent local and remote edits must produce a 'filename (conflicted copy).ext' next to the original rather than overwriting either side."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "normal"
+order = 90
+created = 2026-08-29
+tags = ["sync"]
+
+[[task]]
+id = "add-an-end-to-end-sync-test-against-a-dropbox-test-account"
+title = "Add an end-to-end sync test against a Dropbox test account"
+description = "Prove the round trip: local write appears remotely, remote write appears locally via long-poll within seconds, and a deliberate divergence produces a conflicted copy."
+status = "active"
+level = "task"
+category = "test"
+urgency = "normal"
+order = 100
+created = 2026-08-29
+tags = ["test"]
