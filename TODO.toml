@@ -51,30 +51,6 @@ created = 2026-08-29
 tags = ["download", "performance"]
 
 [[task]]
-id = "run-the-parallel-track-under-the-byte-budget"
-title = "Run the parallel track under the byte budget"
-description = """
-The wiring step of [download-files-in-parallel-under-a-byte-budget]. Depends on the decide/fetch/record split, the budget controller, and the page partition all being in place.
-
-In apply_page (src/reconcile/mod.rs:182), drive the parallel track concurrently: for each admitted entry run the decide and fetch phases, then feed outcomes back to a single owner that runs record against &mut SyncState. Only the fetch phase overlaps; state mutation stays single-threaded, which is what the phase split buys.
-
-Concrete obstacles to expect:
-
-  - apply_page takes &mut self and reaches self.source, self.paths, and self.state. Split the borrow explicitly (&self.source, &self.paths, &mut self.state) or the borrow checker will reject holding the source across concurrent tasks while the state is mutable.
-  - RemoteSource methods return impl Future + Send and take &self, so sharing is fine, but concurrent use will likely require adding a Sync bound to S at the call site. Check that FakeRemote (src/reconcile/testing.rs) still satisfies it -- its interior mutability is behind a Mutex, so it should.
-  - Preserve the current error policy exactly: one failing entry is logged at warn and stepped over, the cursor still advances, and a later change re-delivers the path. A JoinError or a panicking task must not abort the page.
-  - Results must be recorded in a deterministic order even though they complete out of order, or two runs over the same page produce different state files. Feed outcomes back in listing order rather than completion order.
-
-Cover with a test that a page of N files issues N downloads with more than one in flight (FakeRemote can count concurrent calls with a high-water mark), and that the resulting state matches what the sequential path produced for the same page."""
-status = "active"
-level = "task"
-category = "feature"
-urgency = "normal"
-order = 44
-created = 2026-08-29
-tags = ["download", "performance"]
-
-[[task]]
 id = "rework-checkpointing-for-out-of-order-completion"
 title = "Rework checkpointing for out-of-order completion"
 description = """

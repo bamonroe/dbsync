@@ -25,6 +25,7 @@ mod apply;
 pub mod budget;
 mod conflict;
 mod local;
+mod page;
 mod paths;
 pub mod schedule;
 mod sink;
@@ -47,18 +48,6 @@ use std::collections::HashSet;
 use crate::api::ListFolderPage;
 use crate::error::{Error, Result};
 use crate::state::{StateDb, SyncState, key_for};
-
-/// How many applied entries between interim state saves inside one page.
-///
-/// A compromise: the state file is rewritten whole, so saving per entry would
-/// make a large pull O(n²) in bytes written, while saving too rarely is what
-/// this exists to avoid. At 100 an interrupt costs at most 99 re-downloads.
-const CHECKPOINT_EVERY: usize = 100;
-
-/// Whether `applied` entries into a page is a point to save state at.
-fn is_checkpoint(applied: usize) -> bool {
-    applied > 0 && applied.is_multiple_of(CHECKPOINT_EVERY)
-}
 
 /// What one pull did. Reported so the daemon can log it and the tests can pin
 /// the re-list path.
@@ -87,15 +76,29 @@ pub struct Reconciler<S> {
     paths: PathMapper,
     db: StateDb,
     state: SyncState,
+    /// The gate every concurrent download passes through.
+    admission: Admission,
 }
 
-impl<S: RemoteSource + RemoteSink> Reconciler<S> {
+impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
     pub fn new(source: S, paths: PathMapper, db: StateDb, state: SyncState) -> Self {
+        Self::with_budget(source, paths, db, state, Budget::default())
+    }
+
+    /// The same, with the download budget chosen rather than defaulted.
+    pub fn with_budget(
+        source: S,
+        paths: PathMapper,
+        db: StateDb,
+        state: SyncState,
+        budget: Budget,
+    ) -> Self {
         Self {
             source,
             paths,
             db,
             state,
+            admission: Admission::new(budget),
         }
     }
 
@@ -174,32 +177,33 @@ impl<S: RemoteSource + RemoteSink> Reconciler<S> {
     /// Apply a page, then advance and persist the cursor.
     ///
     /// The order matters: advancing first would let a crash mid-page lose
-    /// changes permanently, whereas re-applying a page is harmless.
+    /// changes permanently, whereas re-applying a page is harmless. Under
+    /// concurrency this stops being free — the page's slowest download now
+    /// gates the advance — but it is still the right trade, and a Dropbox
+    /// cursor is opaque and cannot be positioned mid-page anyway.
     ///
-    /// Entries are also checkpointed *within* the page, every
-    /// [`CHECKPOINT_EVERY`] applications. A first listing arrives in pages of up
-    /// to ten thousand entries, so saving only at the page boundary means an
-    /// interrupt hours in loses every entry recorded since the last one — the
-    /// files are on disk but untracked, and the next run downloads them all
-    /// again. These interim saves never touch the cursor, so the
-    /// apply-before-advance ordering above still holds.
+    /// The page itself is applied by [`page::Page`], which overlaps the
+    /// downloads it safely can; entries are checkpointed *within* the page as
+    /// they complete. A first listing arrives in pages of up to ten thousand
+    /// entries, so saving only at the page boundary means an interrupt hours in
+    /// loses every entry recorded since the last one — the files are on disk
+    /// but untracked, and the next run downloads them all again. Those interim
+    /// saves never touch the cursor, so the apply-before-advance ordering above
+    /// still holds.
     async fn apply_page(&mut self, page: ListFolderPage) -> Result<usize> {
-        let mut applied = 0;
-        for entry in &page.entries {
-            match apply::apply_entry(&self.source, &self.paths, &mut self.state, entry).await {
-                Ok(_) => applied += 1,
-                // One bad path must not stall the whole stream; the cursor
-                // still advances, and a later change re-delivers the path.
-                Err(error) => {
-                    tracing::warn!(path = entry.display_path(), %error, "could not apply entry")
-                }
-            }
-            if is_checkpoint(applied) {
-                self.db.save(&self.state)?;
-                tracing::debug!(applied, "checkpointed mid-page");
-            }
+        let ListFolderPage {
+            entries, cursor, ..
+        } = page;
+        let applied = page::Page {
+            source: &self.source,
+            paths: &self.paths,
+            state: &mut self.state,
+            db: &self.db,
+            admission: &self.admission,
         }
-        self.state.set_cursor(page.cursor);
+        .apply(&entries)
+        .await?;
+        self.state.set_cursor(cursor);
         self.db.save(&self.state)?;
         Ok(applied)
     }
@@ -299,6 +303,11 @@ mod tests {
         /// An applier over a fresh temp directory, with `cursor` as its
         /// starting position (`None` forces a full listing).
         fn new(cursor: Option<&str>) -> Self {
+            Self::with_budget(cursor, Budget::default())
+        }
+
+        /// The same, with the download budget chosen.
+        fn with_budget(cursor: Option<&str>, budget: Budget) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let mut state = SyncState::new();
             if let Some(cursor) = cursor {
@@ -308,13 +317,25 @@ mod tests {
             let paths = PathMapper::new(dir.path().join("root"), "");
             std::fs::create_dir_all(dir.path().join("root")).unwrap();
             Self {
-                applier: Reconciler::new(FakeRemote::new(), paths, db, state),
+                applier: Reconciler::with_budget(FakeRemote::new(), paths, db, state, budget),
                 dir,
             }
         }
 
         fn remote(&self) -> &FakeRemote {
             &self.applier.source
+        }
+
+        /// Put `count` distinct files in the fake account and return the
+        /// entries a page would carry for them.
+        fn stage_files(&self, count: usize) -> Vec<RemoteEntry> {
+            (0..count)
+                .map(|i| {
+                    let path = format!("/f{i}.txt");
+                    self.remote().put(&path, path.as_bytes());
+                    file(&path, "r1")
+                })
+                .collect()
         }
 
         fn local(&self, relative: &str) -> std::path::PathBuf {
@@ -379,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn entries_are_checkpointed_within_a_long_page() {
         let mut fixture = Fixture::new(Some("c0"));
-        let entries: Vec<_> = (0..CHECKPOINT_EVERY + 5)
+        let entries: Vec<_> = (0..page::CHECKPOINT_EVERY + 5)
             .map(|i| {
                 let path = format!("/f{i}.txt");
                 fixture.remote().put(&path, b"x");
@@ -393,20 +414,98 @@ mod tests {
         let saved = StateDb::at(fixture.dir.path().join("state.json"))
             .load()
             .unwrap();
-        assert_eq!(saved.len(), CHECKPOINT_EVERY + 5);
+        assert_eq!(saved.len(), page::CHECKPOINT_EVERY + 5);
         assert_eq!(saved.cursor(), Some("c1"));
     }
 
-    /// Interim saves land on the interval and nowhere else. The end-to-end
-    /// case — killing the process mid-page — cannot be reached from a unit
-    /// test, so the interval itself is what gets covered here.
-    #[test]
-    fn state_is_checkpointed_on_the_interval_only() {
-        assert!(!is_checkpoint(0), "no save before anything is applied");
-        assert!(!is_checkpoint(CHECKPOINT_EVERY - 1));
-        assert!(is_checkpoint(CHECKPOINT_EVERY));
-        assert!(!is_checkpoint(CHECKPOINT_EVERY + 1));
-        assert!(is_checkpoint(CHECKPOINT_EVERY * 3));
+    /// A page of independent files must overlap its downloads rather than
+    /// walking them one at a time — the whole point of the parallel track.
+    #[tokio::test]
+    async fn a_page_of_files_downloads_more_than_one_at_a_time() {
+        let mut fixture = Fixture::new(Some("c0"));
+        let entries = fixture.stage_files(8);
+        fixture.remote().queue_continue(page(entries, "c1", false));
+
+        let pull = fixture.applier.pull().await.unwrap();
+        assert_eq!(pull.applied, 8);
+        assert_eq!(fixture.remote().downloads(), 8);
+        assert_eq!(fixture.remote().peak_in_flight(), 8);
+        assert!(fixture.local("f7.txt").exists());
+    }
+
+    /// ...and the budget is what bounds that overlap: a ceiling of one is the
+    /// old sequential behaviour, reachable by configuration alone.
+    #[tokio::test]
+    async fn the_budget_bounds_how_many_overlap() {
+        let mut fixture = Fixture::with_budget(
+            Some("c0"),
+            Budget {
+                bytes: 1,
+                floor: 1,
+                ceiling: 1,
+            },
+        );
+        let entries = fixture.stage_files(6);
+        fixture.remote().queue_continue(page(entries, "c1", false));
+
+        fixture.applier.pull().await.unwrap();
+        assert_eq!(fixture.remote().downloads(), 6);
+        assert_eq!(fixture.remote().peak_in_flight(), 1);
+    }
+
+    /// Concurrency must not change what is written: downloads complete out of
+    /// order, but outcomes are recorded in listing order, so the state file a
+    /// parallel run leaves is byte-identical to a serial one's.
+    #[tokio::test]
+    async fn a_parallel_page_leaves_the_same_state_as_a_serial_one() {
+        async fn run(budget: Budget) -> String {
+            let mut fixture = Fixture::with_budget(Some("c0"), budget);
+            let entries = fixture.stage_files(12);
+            fixture.remote().queue_continue(page(entries, "c1", false));
+            fixture.applier.pull().await.unwrap();
+            let saved = std::fs::read_to_string(fixture.dir.path().join("state.json")).unwrap();
+            // Every mtime is a wall clock reading and differs between runs;
+            // everything else must not.
+            saved
+                .lines()
+                .filter(|line| !line.contains("mtime_nanos"))
+                .collect()
+        }
+
+        let serial = Budget {
+            bytes: 1,
+            floor: 1,
+            ceiling: 1,
+        };
+        assert_eq!(run(Budget::default()).await, run(serial).await);
+    }
+
+    /// One file too big for the whole budget must still be fetched, alone,
+    /// rather than waiting for room that will never exist.
+    #[tokio::test]
+    async fn a_file_larger_than_the_budget_is_still_downloaded() {
+        let mut fixture = Fixture::with_budget(
+            Some("c0"),
+            Budget {
+                bytes: 8,
+                floor: 1,
+                ceiling: 4,
+            },
+        );
+        fixture.remote().put("/big.bin", b"far too many bytes");
+        let entry = RemoteEntry::File(RemoteFile {
+            path_lower: "/big.bin".into(),
+            path_display: "/big.bin".into(),
+            rev: "r1".into(),
+            size: 1_000_000,
+            content_hash: None,
+        });
+        fixture
+            .remote()
+            .queue_continue(page(vec![entry], "c1", false));
+
+        assert_eq!(fixture.applier.pull().await.unwrap().applied, 1);
+        assert!(fixture.local("big.bin").exists());
     }
 
     #[tokio::test]

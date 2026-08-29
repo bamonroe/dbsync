@@ -43,10 +43,21 @@ pub enum Applied {
 ///
 /// Borrowing from the entry rather than copying out of it keeps the decision
 /// free: a plan is only ever used while the page that produced it is alive.
-struct Plan<'a> {
+pub(crate) struct Plan<'a> {
     /// Where on disk this entry lands.
     local: PathBuf,
     action: Action<'a>,
+}
+
+impl Plan<'_> {
+    /// How many bytes this plan will pull, for the admission budget. Anything
+    /// that is not a download costs nothing.
+    pub(crate) fn size(&self) -> u64 {
+        match &self.action {
+            Action::Download { file, .. } => file.size,
+            _ => 0,
+        }
+    }
 }
 
 /// The work a [`Plan`] calls for.
@@ -79,7 +90,11 @@ pub async fn apply_entry<S: RemoteSource>(
 }
 
 /// Phase one: work out what to do, reading the state but touching nothing.
-fn decide<'a>(paths: &PathMapper, state: &SyncState, entry: &'a RemoteEntry) -> Result<Plan<'a>> {
+pub(crate) fn decide<'a>(
+    paths: &PathMapper,
+    state: &SyncState,
+    entry: &'a RemoteEntry,
+) -> Result<Plan<'a>> {
     let local = paths.to_local(entry.display_path())?;
     let action = match entry {
         RemoteEntry::File(file) => decide_file(state, file, &local)?,
@@ -112,7 +127,7 @@ fn decide_file<'a>(state: &SyncState, file: &'a RemoteFile, local: &Path) -> Res
 
 /// Phase two: do the network and disk work. Reads no state and writes none,
 /// which is what makes this the phase that can run many at a time.
-async fn fetch<S: RemoteSource>(source: &S, plan: &Plan<'_>) -> Result<Applied> {
+pub(crate) async fn fetch<S: RemoteSource>(source: &S, plan: &Plan<'_>) -> Result<Applied> {
     match &plan.action {
         Action::Skip => Ok(Applied::AlreadyCurrent),
         Action::Download { file, preserve } => {
@@ -140,7 +155,7 @@ async fn fetch<S: RemoteSource>(source: &S, plan: &Plan<'_>) -> Result<Applied> 
 /// Only reached once the fetch succeeded, so a failed download or a directory
 /// that could not be removed leaves the state alone and the path is re-applied
 /// when the change stream next mentions it.
-fn record(state: &mut SyncState, plan: &Plan<'_>) -> Result<()> {
+pub(crate) fn record(state: &mut SyncState, plan: &Plan<'_>) -> Result<()> {
     match &plan.action {
         Action::Download { file, .. } => {
             // Re-describe from disk rather than from the metadata: the hash and

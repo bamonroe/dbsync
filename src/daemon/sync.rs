@@ -33,7 +33,7 @@ pub struct Summary {
 /// Every pull republishes the cursor through `cursor`, because the long-poll
 /// loop is parked on the previous one and would otherwise be told about the
 /// same change again on its next wake.
-pub async fn run<S: RemoteSource + RemoteSink>(
+pub async fn run<S: RemoteSource + RemoteSink + Sync>(
     reconciler: &mut Reconciler<S>,
     cursor: &CursorHandle,
     mut events: mpsc::Receiver<RemoteEvent>,
@@ -72,7 +72,7 @@ pub async fn run<S: RemoteSource + RemoteSink>(
 ///
 /// A failed pull is logged rather than fatal: the cursor was not advanced past
 /// anything unapplied, so the next notification retries the same work.
-async fn pull<S: RemoteSource + RemoteSink>(
+async fn pull<S: RemoteSource + RemoteSink + Sync>(
     reconciler: &mut Reconciler<S>,
     cursor: &CursorHandle,
     event: RemoteEvent,
@@ -96,7 +96,10 @@ async fn pull<S: RemoteSource + RemoteSink>(
 }
 
 /// Upload one settled batch of local paths.
-async fn push<S: RemoteSource + RemoteSink>(reconciler: &mut Reconciler<S>, batch: &[PathBuf]) {
+async fn push<S: RemoteSource + RemoteSink + Sync>(
+    reconciler: &mut Reconciler<S>,
+    batch: &[PathBuf],
+) {
     match reconciler.push(batch).await {
         Ok(push) => tracing::info!(
             uploaded = push.uploaded,

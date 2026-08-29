@@ -107,7 +107,15 @@ admitted regardless of it, so one enormous file cannot serialise the small files
 it; and a ceiling (16) caps the count however tiny the files are. Where the floor and the byte
 budget conflict, the floor wins and the ceiling beats both, and a file larger than the whole
 budget is charged the whole budget so it runs alone rather than never. The gate is written as a
-pure counter with no network or disk dependency; it is not yet wired into `apply_page`.
+pure counter with no network or disk dependency.
+
+`src/reconcile/page.rs` is where the three come together. It walks the steps, and for each
+concurrent step it decides every entry, awaits the fetches together under the budget, and then
+records the outcomes **in listing order rather than completion order** — downloads finish out
+of order by nature, and recording as they land would make the state file depend on the timing
+of the network. Entries for one path are walked in rounds so a second revision always decides
+against the state the first one recorded. The error policy is unchanged from the sequential
+loop: one bad entry is logged and stepped over, and a later change re-delivers the path.
 
 Two consequences worth knowing. The conflict check belongs to `decide`, not to the download,
 because asking after the fetch would reopen the window that spurious conflicted copies came
@@ -119,7 +127,11 @@ Three rules hold the whole thing together:
 
 - **The cursor advances only after its page has been applied**, and is persisted immediately.
   A crash therefore re-delivers a page rather than skipping it, and re-applying a page is
-  harmless because every operation is idempotent.
+  harmless because every operation is idempotent. Under concurrency this is no longer free —
+  the page's slowest download gates the advance — but it stays the right trade, and a Dropbox
+  cursor is opaque, so it cannot be positioned mid-page anyway. Entries *are* saved within a
+  page, every hundred completions; those interim saves only ever add files that really are on
+  disk and never touch the cursor.
 - **A cursor reset is routine, not an error.** `pull` catches it, drops the cursor, and
   re-lists. The re-list *reconciles*: entries whose `rev` still matches are skipped, and
   anything in the state the listing does not mention was deleted remotely while we were
@@ -251,8 +263,9 @@ implementation yet.
 | `src/reconcile/local.rs` | Pushing one local path: upload, delete, or decide it is unchanged | done |
 | `src/reconcile/apply.rs` | Applying one entry in three phases: decide, fetch, record | done |
 | `src/reconcile/conflict.rs` | Conflicted-copy naming, and detecting an unsent local edit | done |
-| `src/reconcile/budget.rs` | Byte-budget admission control for parallel downloads | not yet wired |
-| `src/reconcile/schedule.rs` | Splitting a page into serial and concurrent steps | not yet wired |
+| `src/reconcile/budget.rs` | Byte-budget admission control for parallel downloads | done |
+| `src/reconcile/schedule.rs` | Splitting a page into serial and concurrent steps | done |
+| `src/reconcile/page.rs` | Applying one page, overlapping the downloads it safely can | done |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |
 | `src/watcher/debounce.rs` | Per-path quiet-period coalescing | done |
 | `src/daemon/mod.rs` | Building the components from config and the startup order | done |

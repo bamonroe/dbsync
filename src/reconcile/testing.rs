@@ -20,6 +20,9 @@ pub struct FakeRemote {
     listings: Mutex<VecDeque<Result<ListFolderPage>>>,
     continues: Mutex<VecDeque<Result<ListFolderPage>>>,
     downloads: Mutex<usize>,
+    /// Downloads currently being served, and the most there have ever been at
+    /// once — how a test sees that fetches really did overlap.
+    in_flight: Mutex<(usize, usize)>,
     cursors_used: Mutex<Vec<String>>,
     uploads: Mutex<Vec<WriteMode>>,
     deletes: Mutex<usize>,
@@ -65,6 +68,11 @@ impl FakeRemote {
     /// How many downloads have been served — the check for "did it skip?".
     pub fn downloads(&self) -> usize {
         *self.downloads.lock().unwrap()
+    }
+
+    /// The most downloads that were ever in flight at one time.
+    pub fn peak_in_flight(&self) -> usize {
+        self.in_flight.lock().unwrap().1
     }
 
     /// What a path holds in the fake account, if anything.
@@ -127,10 +135,20 @@ impl RemoteSource for FakeRemote {
             });
         };
         *self.downloads.lock().unwrap() += 1;
+        {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            in_flight.0 += 1;
+            in_flight.1 = in_flight.1.max(in_flight.0);
+        }
+        // Serving without ever yielding would make every download finish before
+        // the next one is polled, so a fake account would look sequential
+        // however concurrent the caller is.
+        tokio::task::yield_now().await;
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(dest, &content).await?;
+        self.in_flight.lock().unwrap().0 -= 1;
         Ok(())
     }
 }
