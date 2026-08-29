@@ -62,7 +62,15 @@ pub fn conflicted_path(local: &Path) -> PathBuf {
 /// cheap metadata check still matches, or the content hash does. Anything else
 /// — including a file we have never tracked at all — is a local edit that must
 /// not be overwritten.
-pub fn has_local_edit(state: &SyncState, display_path: &str, local: &Path) -> Result<bool> {
+/// `incoming_hash` is the content hash of the remote version about to land.
+/// Dropbox omits it on some entries, in which case an untracked local file has
+/// to be treated as a conflict — losing a copy is worse than keeping a spare.
+pub fn has_local_edit(
+    state: &SyncState,
+    display_path: &str,
+    local: &Path,
+    incoming_hash: Option<&str>,
+) -> Result<bool> {
     let Ok(metadata) = std::fs::metadata(local) else {
         return Ok(false);
     };
@@ -70,8 +78,16 @@ pub fn has_local_edit(state: &SyncState, display_path: &str, local: &Path) -> Re
         return Ok(false);
     }
     let Some(entry) = state.get(display_path) else {
-        // Untracked but present: someone put a file where the remote has one.
-        return Ok(true);
+        // Untracked but present. Usually someone put a file where the remote
+        // has one — but it is also what our own interrupted download looks
+        // like, because the file lands in place before the state that records
+        // it is checkpointed. Identical content is not a divergence either
+        // way, so compare before crying conflict; otherwise every restart
+        // mid-pull mints a spurious conflicted copy of its own work.
+        return match incoming_hash {
+            Some(remote) => Ok(hash::hash_file(local)? != remote),
+            None => Ok(true),
+        };
     };
     if entry.metadata_matches(metadata.len(), metadata.modified()?) {
         return Ok(false);
@@ -138,7 +154,7 @@ mod tests {
     fn a_missing_file_is_not_an_edit() {
         let state = SyncState::new();
         let missing = Path::new("/tmp/dbsync-none/gone.txt");
-        assert!(!has_local_edit(&state, "/gone.txt", missing).unwrap());
+        assert!(!has_local_edit(&state, "/gone.txt", missing, None).unwrap());
     }
 
     #[test]
@@ -146,7 +162,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
         std::fs::write(&path, b"mine").unwrap();
-        assert!(has_local_edit(&SyncState::new(), "/a.txt", &path).unwrap());
+        assert!(has_local_edit(&SyncState::new(), "/a.txt", &path, None).unwrap());
+    }
+
+    /// The interrupted-download case: we wrote this file ourselves and died
+    /// before recording it. Identical bytes are not a divergence, and calling
+    /// them one is what filled the tree with spurious conflicted copies.
+    #[test]
+    fn an_untracked_file_matching_the_incoming_content_is_not_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, b"same").unwrap();
+        let incoming = crate::state::hash::hash_bytes(b"same");
+
+        assert!(!has_local_edit(&SyncState::new(), "/a.txt", &path, Some(&incoming)).unwrap());
+    }
+
+    /// A genuinely different untracked file is still a conflict.
+    #[test]
+    fn an_untracked_file_differing_from_the_incoming_content_is_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, b"mine").unwrap();
+        let incoming = crate::state::hash::hash_bytes(b"theirs");
+
+        assert!(has_local_edit(&SyncState::new(), "/a.txt", &path, Some(&incoming)).unwrap());
     }
 
     #[test]
@@ -157,6 +197,6 @@ mod tests {
         let mut state = SyncState::new();
         state.insert(crate::state::entry_for_local_file(&path, "/a.txt", "r1").unwrap());
 
-        assert!(!has_local_edit(&state, "/a.txt", &path).unwrap());
+        assert!(!has_local_edit(&state, "/a.txt", &path, None).unwrap());
     }
 }

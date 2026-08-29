@@ -62,7 +62,12 @@ async fn apply_file<S: RemoteSource>(
     }
     // Both sides moved: the remote version is about to land on this path, so
     // the local bytes have to be set aside first or they are gone for good.
-    let conflicted = conflict::has_local_edit(state, &file.path_display, local)?;
+    let conflicted = conflict::has_local_edit(
+        state,
+        &file.path_display,
+        local,
+        file.content_hash.as_deref(),
+    )?;
     if conflicted {
         conflict::preserve(local).await?;
     }
