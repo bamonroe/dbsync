@@ -23,3 +23,6 @@ dist/
 # Editor / OS
 .DS_Store
 *.swp
+target/
+config.toml
+sync/

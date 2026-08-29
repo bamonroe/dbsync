@@ -1,0 +1,20 @@
+# dbsync configuration. Copy to config.toml and edit.
+
+# The local directory kept in sync. Created if missing.
+local_root = "/data/Dropbox"
+
+# The Dropbox-side folder to mirror. "" means the app's root.
+remote_root = ""
+
+# Dropbox app key, from https://www.dropbox.com/developers/apps
+# Only the key is needed — dbsync uses OAuth2 PKCE, so no app secret is stored.
+app_key = "your-app-key-here"
+
+[longpoll]
+# Seconds the long-poll request is allowed to block before returning
+# `changes: false`. Dropbox permits 30-480.
+timeout_secs = 300
+
+[watcher]
+# How long local filesystem events are coalesced before an upload is attempted.
+debounce_ms = 500

@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "scaffold-the-rust-crate-and-container-build"
-title = "Scaffold the Rust crate and container build"
-description = "Create the cargo workspace, a Dockerfile and compose.yaml so 'docker compose build' works from a fresh checkout, and wire the module skeleton from docs/architecture.md (auth, api, notify, watcher, state, reconcile, daemon)."
-status = "active"
-level = "task"
-category = "chore"
-urgency = "high"
-order = 20
-created = 2026-08-29
-tags = ["build"]
-
-[[task]]
 id = "implement-oauth2-pkce-login-and-token-refresh"
 title = "Implement OAuth2 PKCE login and token refresh"
 description = "The 'auth' module: run the PKCE flow via 'dbsync auth login', persist the refresh token outside the repo, and transparently refresh on 401. No app secret on disk."
@@ -47,7 +35,7 @@ tags = ["auth"]
 [[task]]
 id = "implement-the-long-poll-notification-loop"
 title = "Implement the long-poll notification loop"
-description = "The 'notify' module: park on notify.dropboxapi.com/2/files/list_folder/longpoll with the saved cursor, honour the 'backoff' field, reconnect on timeout, and emit a change signal. Separate unauthenticated HTTP client from the API client."
+description = "The 'notify' module. DONE: the LongpollClient call itself (separate unauthenticated client, backoff/timeout/changed outcomes, cursor-reset detection). REMAINING: the driving loop that holds a cursor, honours backoff, reconnects, and emits change signals to the reconciler."
 status = "active"
 level = "task"
 category = "feature"
@@ -65,18 +53,6 @@ level = "task"
 category = "feature"
 urgency = "high"
 order = 50
-created = 2026-08-29
-tags = ["state"]
-
-[[task]]
-id = "implement-dropbox-content-hashing"
-title = "Implement Dropbox content hashing"
-description = "The 4 MiB block SHA-256 tree Dropbox uses for content identity. Needed so the daemon recognises the echo of its own upload and does not re-apply it."
-status = "active"
-level = "task"
-category = "feature"
-urgency = "normal"
-order = 60
 created = 2026-08-29
 tags = ["state"]
 
@@ -127,3 +103,15 @@ urgency = "normal"
 order = 100
 created = 2026-08-29
 tags = ["test"]
+
+[[task]]
+id = "add-a-config-drift-test-between-config-rs-and-config-example-toml"
+title = "Add a config drift test between config.rs and config.example.toml"
+description = "CLAUDE.md requires code-derived docs to be mechanically checked. Fail the build when config.example.toml gains or loses a key relative to the Config struct."
+status = "active"
+level = "task"
+category = "test"
+urgency = "normal"
+order = 110
+created = 2026-08-29
+tags = ["docs"]

@@ -15,3 +15,25 @@ order = "newest first"
 [meta.rules]
 finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, append-only."
 growth = "This file only grows; nothing is removed from it."
+
+[[task]]
+id = "implement-dropbox-content-hashing"
+title = "Implement Dropbox content hashing"
+description = "The 4 MiB block SHA-256 tree Dropbox uses for content identity. Needed so the daemon recognises the echo of its own upload and does not re-apply it."
+status = "finished"
+level = "task"
+category = "feature"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["state"]
+
+[[task]]
+id = "scaffold-the-rust-crate-and-container-build"
+title = "Scaffold the Rust crate and container build"
+description = "Create the cargo workspace, a Dockerfile and compose.yaml so 'docker compose build' works from a fresh checkout, and wire the module skeleton from docs/architecture.md (auth, api, notify, watcher, state, reconcile, daemon)."
+status = "finished"
+level = "task"
+category = "chore"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["build"]

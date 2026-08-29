@@ -51,19 +51,38 @@ Both directions funnel through a single **reconciler** so that a change is never
 both directions at once; the reconciler owns the local↔remote state database and is the only
 component allowed to write it.
 
-## Components (planned module layout)
+## Repository layout
 
 Per the "keep the code split up" rule in `CLAUDE.md`, each of these is its own module, not a
-mono-file:
+mono-file. "stub" means the file exists with its doc comment and its `TODO.toml` task, but no
+implementation yet.
 
-- `auth` — OAuth2 PKCE flow, refresh-token storage, token refresh on 401.
-- `api` — typed wrappers over the Dropbox HTTP endpoints (metadata, upload, download,
-  upload sessions for large files).
-- `notify` — the long-poll loop: cursor in, change signal out; owns backoff and reconnect.
-- `watcher` — inotify subscription plus debounce/coalescing of local events.
-- `state` — the local sync database: path → (rev, content hash, local mtime, size).
-- `reconcile` — the change-application engine: conflict detection, ordering, retries.
-- `daemon` — process lifecycle, config, signal handling, wiring the above together.
+| Path | Responsibility | State |
+|---|---|---|
+| `src/main.rs` | CLI parsing and dispatch only (`run`, `auth`, `check`) | done |
+| `src/lib.rs` | Library root; re-exports `Config`, `Error`, `Result` | done |
+| `src/config.rs` | Load and validate `config.toml` | done |
+| `src/error.rs` | Crate-wide `Error`/`Result` | done |
+| `src/notify/longpoll.rs` | The long-poll call: cursor in, outcome out | done |
+| `src/state/hash.rs` | Dropbox content hash (4 MiB SHA-256 tree) | done |
+| `src/state/mod.rs` | Local sync database; the only writer of sync state | stub |
+| `src/auth.rs` | OAuth2 PKCE flow, refresh-token storage, refresh on 401 | stub |
+| `src/api.rs` | Typed wrappers over the authenticated endpoints | stub |
+| `src/watcher.rs` | inotify subscription plus debounce/coalescing | stub |
+| `src/reconcile.rs` | Change-application engine: conflicts, ordering, retries | stub |
+| `src/daemon.rs` | Process lifecycle, signals, wiring the above together | stub |
+
+The `notify` crate (inotify bindings) is renamed to `notify_fs` in `Cargo.toml`, because the
+name collides with our own `crate::notify` module.
+
+## Container build
+
+`Dockerfile` is a two-stage build: a pinned `rust:1.90-slim-bookworm` builder and a
+`debian:bookworm-slim` runtime carrying only the binary and a CA bundle. Dependencies are
+compiled in their own layer ahead of `COPY src`, so a source-only change does not rebuild the
+dependency tree. The runtime runs as uid 1000 rather than root; `compose.yaml` matches that
+uid so synced files keep their ownership, and keeps credentials in a named volume rather than
+in the image.
 
 ## Load-bearing invariants
 

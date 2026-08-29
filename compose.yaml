@@ -1,0 +1,23 @@
+# Podman-compatible: no Docker-only features are used here.
+
+services:
+  dbsync:
+    build:
+      context: .
+    image: dbsync:dev
+    # inotify watches are per-user; keep the container user matched to the
+    # owner of the synced directory so uploads and downloads keep their mode.
+    user: "1000:1000"
+    environment:
+      RUST_LOG: ${RUST_LOG:-dbsync=info}
+    volumes:
+      # The configuration, read-only.
+      - ./config.toml:/home/dbsync/config.toml:ro
+      # The directory being synced. Must match `local_root` in config.toml.
+      - ${DBSYNC_LOCAL_ROOT:-./sync}:/data/Dropbox
+      # Credentials, kept out of the repo and out of the image.
+      - dbsync-auth:/home/dbsync/.local/share/dbsync
+    restart: unless-stopped
+
+volumes:
+  dbsync-auth:

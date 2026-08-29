@@ -1,0 +1,7 @@
+target/
+.git/
+.claude/
+docs/
+*.md
+config.toml
+sync/

@@ -5,8 +5,9 @@ sync and behaves like the native desktop client — remote changes arrive by **p
 long-poll notification endpoint) rather than by periodic polling, so edits made elsewhere show
 up locally within seconds.
 
-> **Status:** early. The scaffold and design are in place; see `TODO.toml` for what's active
-> and `FINISHED.toml` for what has shipped.
+> **Status:** early. The crate, container build, config loading, content hashing, and the
+> long-poll client are in place; **syncing is not implemented yet** — `dbsync run` will tell
+> you so and exit. See `TODO.toml` for what's active and `FINISHED.toml` for what has shipped.
 
 ## How it works
 
@@ -36,10 +37,16 @@ Copy the example config and fill in your app key:
 cp config.example.toml config.toml
 ```
 
+Check that the daemon reads it as you expect:
+
+```sh
+docker compose run --rm dbsync check
+```
+
 Then link the account — this runs the OAuth flow and stores a refresh token:
 
 ```sh
-docker compose run --rm dbsync auth login
+docker compose run --rm dbsync auth login     # not implemented yet
 ```
 
 ## Run
