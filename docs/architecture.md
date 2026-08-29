@@ -219,6 +219,17 @@ registered in the Dropbox app console ahead of time. The listener binds `127.0.0
 exits as soon as it has a code. This is not a contradiction of the no-public-server rule
 above — nothing is ever reachable off the loopback interface.
 
+There is a second way in, `auth login --paste-code`, which omits `redirect_uri` from the
+authorize request entirely. Dropbox then renders the code in the browser instead of
+redirecting, and the user pastes it at a prompt. This is the flow for a headless host: the
+approving browser is on a different machine, so a loopback listener here is unreachable no
+matter what port it binds. The exchange must then *also* omit `redirect_uri` — OAuth2 requires
+the two requests to agree, and sending one only at exchange time is a mismatch.
+
+That flow drops the `state` parameter, which is correct rather than a shortcut: `state` binds
+a redirect to the flow that started it, and there is no redirect. The PKCE verifier still
+binds the exchange, and the code travels through the user rather than over the network.
+
 Two safety properties worth keeping:
 
 - The `state` parameter is random per login and checked on return, so a third party cannot

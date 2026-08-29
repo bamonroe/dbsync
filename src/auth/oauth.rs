@@ -25,12 +25,32 @@ pub fn redirect_uri() -> String {
 pub fn authorize_url(app_key: &str, challenge: &str, state: &str) -> String {
     let encode = urlencoding::encode;
     format!(
-        "{AUTHORIZE_URL}?client_id={}&response_type=code&token_access_type=offline\
-         &code_challenge={}&code_challenge_method=S256&redirect_uri={}&state={}",
-        encode(app_key),
-        encode(challenge),
+        "{}&redirect_uri={}&state={}",
+        base_authorize_url(app_key, challenge),
         encode(&redirect_uri()),
         encode(state),
+    )
+}
+
+/// Build the authorize URL for the paste-the-code flow.
+///
+/// Omitting `redirect_uri` is what makes Dropbox display the authorization
+/// code on screen instead of redirecting a browser, which is the only workable
+/// shape on a headless box: the approving browser is on another machine, so
+/// nothing can reach a loopback listener here. No `state` either — it guards
+/// against a forged redirect, and there is no redirect to forge.
+pub fn authorize_url_for_paste(app_key: &str, challenge: &str) -> String {
+    base_authorize_url(app_key, challenge)
+}
+
+/// The parameters both flows share.
+fn base_authorize_url(app_key: &str, challenge: &str) -> String {
+    let encode = urlencoding::encode;
+    format!(
+        "{AUTHORIZE_URL}?client_id={}&response_type=code&token_access_type=offline\
+         &code_challenge={}&code_challenge_method=S256",
+        encode(app_key),
+        encode(challenge),
     )
 }
 
@@ -70,6 +90,21 @@ impl OauthClient {
             ("client_id", &self.app_key),
             ("code_verifier", verifier),
             ("redirect_uri", &redirect),
+        ])
+        .await
+    }
+
+    /// Exchange a code the user pasted in by hand.
+    ///
+    /// `redirect_uri` is omitted deliberately: OAuth2 requires the exchange to
+    /// echo whatever the authorize request sent, and the paste flow sent none.
+    /// Including one here would be rejected as a mismatch.
+    pub async fn exchange_pasted_code(&self, code: &str, verifier: &str) -> Result<TokenResponse> {
+        self.post(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("client_id", &self.app_key),
+            ("code_verifier", verifier),
         ])
         .await
     }
@@ -133,6 +168,26 @@ mod tests {
     fn the_authorize_url_percent_encodes_the_redirect() {
         let url = authorize_url("k", "c", "s");
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A53682"));
+    }
+
+    /// The absent `redirect_uri` is the whole point: it is what makes Dropbox
+    /// display the code instead of redirecting.
+    #[test]
+    fn the_paste_authorize_url_sends_no_redirect_uri() {
+        let url = authorize_url_for_paste("appkey", "chal-123");
+        assert!(!url.contains("redirect_uri"));
+        assert!(!url.contains("state="));
+    }
+
+    #[test]
+    fn the_paste_authorize_url_still_carries_pkce_and_offline_access() {
+        let url = authorize_url_for_paste("appkey", "chal-123");
+        assert!(url.starts_with(AUTHORIZE_URL));
+        assert!(url.contains("client_id=appkey"));
+        assert!(url.contains("code_challenge=chal-123"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("token_access_type=offline"));
+        assert!(url.contains("response_type=code"));
     }
 
     #[test]

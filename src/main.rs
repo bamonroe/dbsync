@@ -36,7 +36,14 @@ enum Command {
 #[derive(Subcommand)]
 enum AuthAction {
     /// Run the OAuth2 PKCE flow and store a refresh token.
-    Login,
+    Login {
+        /// Paste the code by hand instead of catching a browser redirect.
+        ///
+        /// Use this over SSH: the browser is on another machine and cannot
+        /// reach a loopback listener here.
+        #[arg(long)]
+        paste_code: bool,
+    },
     /// Show which account is currently linked.
     Status,
 }
@@ -77,8 +84,12 @@ async fn main() -> anyhow::Result<()> {
             let config = Config::load(&cli.config)?;
             let store = TokenStore::default_location()?;
             match action {
-                AuthAction::Login => {
-                    let credentials = auth::login(&config.app_key, &store).await?;
+                AuthAction::Login { paste_code } => {
+                    let credentials = if paste_code {
+                        auth::login_with_pasted_code(&config.app_key, &store).await?
+                    } else {
+                        auth::login(&config.app_key, &store).await?
+                    };
                     println!(
                         "\nLinked{}. Credentials saved to {}.",
                         credentials

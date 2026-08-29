@@ -20,9 +20,16 @@ behind that choice are in [`docs/architecture.md`](docs/architecture.md).
 
 - Docker (or Podman) — the build and run both happen in a container; no host Rust toolchain
   is needed.
-- A Dropbox app created at <https://www.dropbox.com/developers/apps> with the
-  `files.content.read` and `files.content.write` scopes, and
-  `http://localhost:53682` added as a redirect URI.
+- A Dropbox app created at <https://www.dropbox.com/developers/apps>, with:
+  - the `files.content.read` and `files.content.write` scopes;
+  - **Allow public clients (Implicit Grant & PKCE)** enabled — dbsync is a PKCE-only public
+    client and Dropbox rejects the authorize request outright without it;
+  - `http://localhost:53682` added as a redirect URI — needed only for the browser-redirect
+    login below, not for `--paste-code`.
+
+  dbsync has no built-in app key to borrow. Other clients ship one shared across all their
+  users, but those apps are registered as confidential clients with a secret, so their keys
+  cannot be reused by a PKCE client like this one.
 
 ## Build
 
@@ -59,13 +66,30 @@ docker compose run --rm dbsync check
 
 ## Link your Dropbox account
 
+Two ways in, depending on whether a browser can reach this machine.
+
+### Headless / over SSH — paste the code
+
+```sh
+docker compose run --rm -it dbsync auth login --paste-code
+```
+
+This prints a URL. Open it in a browser **anywhere** — your laptop, your phone — approve the
+app, and Dropbox shows you an authorization code. Paste it at the `Code:` prompt and dbsync
+exchanges it for a refresh token.
+
+Nothing listens on a port, so there is no SSH tunnel to set up and no redirect URI to
+register. `-it` is required: the prompt reads from stdin.
+
+### Local machine — catch the redirect
+
 ```sh
 docker compose run --rm -p 53682:53682 dbsync auth login
 ```
 
-This prints a URL. Open it, approve the app, and the browser is redirected back to
-`http://localhost:53682`, where dbsync catches the authorization code and exchanges it for a
-refresh token. The `-p` flag is required: without it the redirect cannot reach the container.
+Open the printed URL and the browser is redirected back to `http://localhost:53682`, where
+dbsync catches the code. This needs `http://localhost:53682` registered as a redirect URI on
+the app, and the `-p` flag — without it the redirect cannot reach the container.
 
 dbsync uses OAuth2 **PKCE**, so no app secret is ever stored — only your app key, in
 `config.toml`. The refresh token is written to `~/.local/share/dbsync/credentials.json` with
