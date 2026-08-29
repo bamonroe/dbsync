@@ -19,15 +19,3 @@ add_proposed_work = "Add proposed work as a new task rather than losing it."
 remove_dropped_items = "Remove dropped items with a one-line why."
 finish_work = "When a task is fully finished (built, tested, documented), run `scripts/todo.sh done <id>` to move it to FINISHED.toml."
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
-
-[[task]]
-id = "add-a-config-drift-test-between-config-rs-and-config-example-toml"
-title = "Add a config drift test between config.rs and config.example.toml"
-description = "CLAUDE.md requires code-derived docs to be mechanically checked. Fail the build when config.example.toml gains or loses a key relative to the Config struct."
-status = "active"
-level = "task"
-category = "test"
-urgency = "normal"
-order = 110
-created = 2026-08-29
-tags = ["docs"]

@@ -38,6 +38,10 @@ Copy the example config and fill in your app key:
 cp config.example.toml config.toml
 ```
 
+`config.example.toml` lists every option the daemon accepts — a drift test
+(`tests/config_drift.rs`) fails the build if it ever gains or loses a key
+relative to the `Config` struct, so the example is always the complete reference.
+
 Check that the daemon reads it as you expect:
 
 ```sh

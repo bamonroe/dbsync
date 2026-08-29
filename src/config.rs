@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
@@ -13,7 +13,8 @@ use crate::error::{Error, Result};
 const LONGPOLL_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 30..=480;
 
 /// The daemon's on-disk configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Local directory kept in sync.
     pub local_root: PathBuf,
@@ -32,14 +33,16 @@ pub struct Config {
     pub watcher: WatcherConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LongpollConfig {
     /// Seconds a long-poll request may block before returning `changes: false`.
     #[serde(default = "default_longpoll_timeout")]
     pub timeout_secs: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WatcherConfig {
     /// How long local filesystem events are coalesced before uploading.
     #[serde(default = "default_debounce_ms")]
