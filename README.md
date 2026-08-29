@@ -56,6 +56,39 @@ the two match out of the box):
 DBSYNC_LOCAL_ROOT=/srv/dropbox docker compose up -d dbsync
 ```
 
+### Download concurrency
+
+Remote changes are fetched in parallel, and how much may be in flight is decided in
+**bytes, not files** — a hundred tiny files overlap freely while one huge file runs alone.
+The `[download]` section tunes that:
+
+| Key               | Default | What it does                                                        |
+|-------------------|---------|---------------------------------------------------------------------|
+| `budget_bytes`    | 64 MiB  | Total size of downloads allowed in flight at once.                  |
+| `min_concurrency` | 4       | Downloads admitted regardless of the budget, so one enormous file cannot serialise the small files behind it. |
+| `max_concurrency` | 16      | Hard cap on downloads in flight, however small the files.           |
+
+When to change them:
+
+- **A slow or metered link** — lower `budget_bytes`. The budget is what bounds how much of a
+  large file's traffic is in flight, so it is the knob that keeps a thin pipe responsive.
+- **Many small files on a fast link** — raise `max_concurrency`. Small files never exhaust the
+  byte budget, so the count cap is what limits them. Past roughly 16 the extra sockets tend to
+  buy throughput back in Dropbox rate limits, so raise it and measure rather than guessing.
+- **Downloads are stalling behind one huge file** — raise `min_concurrency`.
+
+`budget_bytes` of 0, `min_concurrency` of 0, or a `max_concurrency` below `min_concurrency`
+are refused at startup with an error, rather than leaving the daemon unable to admit anything.
+
+Each key also has a `DBSYNC_`-prefixed environment override, which wins over the file — handy
+for tuning a running container without editing its config:
+
+```sh
+DBSYNC_DOWNLOAD_BUDGET_BYTES=16777216 \
+DBSYNC_DOWNLOAD_MAX_CONCURRENCY=32 \
+  docker compose up -d dbsync
+```
+
 `config.example.toml` lists every option the daemon accepts — a drift test
 (`tests/config_drift.rs`) fails the build if it ever gains or loses a key
 relative to the `Config` struct, so the example is always the complete reference.

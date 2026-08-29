@@ -102,5 +102,12 @@ fn build(config: &Config) -> Result<Reconciler<ApiClient>> {
         remote_root = paths.remote_root(),
         "loaded state"
     );
-    Ok(Reconciler::new(api, paths, db, state))
+    let budget = config.download.budget();
+    tracing::info!(
+        budget_bytes = budget.bytes,
+        min_concurrency = budget.floor,
+        max_concurrency = budget.ceiling,
+        "download budget"
+    );
+    Ok(Reconciler::with_budget(api, paths, db, state, budget))
 }

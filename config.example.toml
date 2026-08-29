@@ -18,3 +18,18 @@ timeout_secs = 300
 [watcher]
 # How long local filesystem events are coalesced before an upload is attempted.
 debounce_ms = 500
+
+[download]
+# How many bytes of downloads may be in flight at once. Downloads are admitted
+# by size, not by file count, so many small files overlap freely while one huge
+# file runs alone. Lower this on a slow or metered link.
+budget_bytes = 67108864
+
+# Downloads admitted regardless of the byte budget, so one enormous file cannot
+# serialise the small files queued behind it. Must be at least 1.
+min_concurrency = 4
+
+# Hard cap on downloads in flight, however small the files. Raise it for an
+# account of many tiny files on a fast link; past ~16 the extra sockets tend to
+# buy throughput back in rate limits. Must be at least min_concurrency.
+max_concurrency = 16

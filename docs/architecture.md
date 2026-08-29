@@ -109,6 +109,17 @@ budget conflict, the floor wins and the ceiling beats both, and a file larger th
 budget is charged the whole budget so it runs alone rather than never. The gate is written as a
 pure counter with no network or disk dependency.
 
+All three are **configurable** — `[download]` in `config.toml`, or the `DBSYNC_DOWNLOAD_*`
+environment overrides (README documents what an operator would change and when). They are
+tuning constants for a network-bound loop, and the right values depend on a link and an
+account this repo cannot see. `Budget` still sanitises what it is handed, so a bad value can
+never wedge the gate, but a zero budget or a ceiling below the floor is *rejected at config
+load* instead: a startup error naming the key beats a pull that mysteriously admits one
+download at a time. Whatever the values, parallelism stays inside the two invariants it may
+not touch: the page barrier still gates the cursor advance (a page is applied in full before
+its cursor is saved, so a crash re-delivers rather than skips), and tombstones still run on
+the serial track as barriers.
+
 `src/reconcile/page.rs` is where the three come together. It walks the steps, and for each
 concurrent step it decides every entry, awaits the fetches together under the budget, and then
 records the outcomes **in listing order rather than completion order** — downloads finish out
