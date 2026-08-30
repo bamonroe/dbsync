@@ -19,15 +19,3 @@ add_proposed_work = "Add proposed work as a new task rather than losing it."
 remove_dropped_items = "Remove dropped items with a one-line why."
 finish_work = "When a task is fully finished (built, tested, documented), run `scripts/todo.sh done <id>` to move it to FINISHED.toml."
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
-
-[[task]]
-id = "document-ranged-chunked-downloads-in-the-architecture-doc"
-title = "Document ranged chunked downloads in the architecture doc"
-description = "docs/architecture.md owns how the data path works and records the load-bearing decisions, so the chunking design belongs there and nowhere else: why chunks address rev:<rev> rather than the display path, why progress moved from a file length to a sidecar bitmap, why completion is 'every chunk present', and how per-file chunk concurrency composes with the across-file byte budget instead of multiplying it. Link it from the download section rather than restating the config keys README.md owns."
-status = "active"
-level = "task"
-category = "docs"
-urgency = "low"
-order = 130
-created = 2026-08-29
-tags = []

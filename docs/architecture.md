@@ -126,6 +126,46 @@ not touch: the page barrier still gates the cursor advance (a page is applied in
 its cursor is saved, so a crash re-delivers rather than skips), and tombstones still run on
 the serial track as barriers.
 
+#### One large file: ranged chunks
+
+Parallelism *across* files does nothing for a single huge one. A 1 GB download is one HTTPS
+stream at whatever one connection gives you, however large the byte budget is. So a file at or
+above a threshold is split into fixed-size byte ranges and fetched concurrently into one
+partial (`src/api/chunks.rs` plans the split, `src/api/download.rs` drives it). Below the
+threshold nothing changes: the file arrives on one stream and resumes from the length of its
+partial, because splitting a small file four ways pays four round trips to save nothing.
+
+Four decisions hold this together, and each exists to rule out a specific failure:
+
+- **Every chunk addresses `rev:<rev>`, never the display path.** That is what makes concurrent
+  chunks provably one revision. Against the display path, a remote edit landing mid-download
+  would splice two revisions into one file — corruption that no later check could see, since
+  the result is the right length and the wrong bytes.
+- **Chunks are a fixed size, written at their true offsets** into a preallocated (sparse)
+  file. Fixed size means chunk N's offset is implied by N rather than stored, so progress
+  collapses to one bit per chunk; true offsets mean the bytes are right by construction
+  whatever order they land in. Only the last chunk is short.
+- **Progress is a sidecar bitmap, not a length** (`src/api/chunkmap.rs`). A length cannot
+  express "chunks 0–3 and 5 landed, 4 did not". The sidecar's header carries the size, chunk
+  size and count it was built for, and a mismatch discards it rather than reinterpreting bits
+  that would point at the wrong bytes. A bit is fsynced before the chunk counts, so a crash
+  may lose progress and refetch — never claim a chunk that is not on disk. The sidecar's name
+  extends the partial's, so the startup sweep clears both together.
+- **Completion is "every chunk present", never "length equals size"** (`src/api/partial.rs`).
+  This is the sharpest edge in the design: a sparse file reaches its full length the moment the
+  *last* chunk lands, so a length test would rename a file still full of holes into place. The
+  sidecar is removed only after the rename succeeds, so a crash between the two leaves a
+  complete partial the next attempt adopts rather than refetches.
+
+Chunk concurrency composes with the byte budget instead of multiplying with it. A file already
+holds an admission for its own bytes, and it may only spend *that* reservation on its own
+chunks — so the slots are `budgeted / chunk_size`, capped per file. A second independent pool
+would multiply: sixteen files times eight chunks is a hundred and twenty-eight sockets from two
+limits that each looked modest. A failing chunk is retried alone and the others keep their
+bits; only a refused range invalidates the whole partial, because in that case the revision
+will not serve what the plan assumed. The keys are in `[download]`; README documents which to
+turn and when.
+
 `src/reconcile/page.rs` is where the three come together. It walks the steps, and for each
 concurrent step it decides every entry, awaits the fetches together under the budget, and then
 records the outcomes **in listing order rather than completion order** — downloads finish out
@@ -271,7 +311,11 @@ implementation yet.
 | `src/api/client.rs` | Authenticated HTTP client, error mapping, refresh-on-401 | done |
 | `src/api/metadata.rs` | The `.tag`-tagged file/folder/tombstone shapes | done |
 | `src/api/list_folder.rs` | `list_folder` and `list_folder/continue` | done |
-| `src/api/download.rs` | Streaming download with an atomic rename into place | done |
+| `src/api/download.rs` | Streaming download with an atomic rename into place; picks whole-file or chunked | done |
+| `src/api/range.rs` | The byte range a download asks for, and verifying the reply honoured it | done |
+| `src/api/chunks.rs` | Planning one file's chunk layout, and its share of the byte budget | done |
+| `src/api/chunkmap.rs` | The sidecar bitmap recording which chunks have landed | done |
+| `src/api/partial.rs` | The partial file chunks are written into, and the completion gate | done |
 | `src/api/upload.rs` | `files/upload`, chunked upload sessions, and delete | done |
 | `src/reconcile/mod.rs` | `Reconciler`: both directions, owning the state between them | done |
 | `src/reconcile/paths.rs` | Dropbox path ⇄ local path, with traversal refused | done |
@@ -369,5 +413,8 @@ in the image.
   cursor, re-run `/files/list_folder`, and reconcile against local state.
 - **Content identity uses Dropbox's content hash** (the 4 MiB block SHA-256 tree), not mtime,
   so an echo of our own upload is recognised and not re-applied.
+- **A chunked download completes on every chunk being present**, never on the file's length.
+  Chunks are written at their true offsets, so the partial is full length as soon as the last
+  one lands; renaming on length would publish a file with holes in the middle.
 - **Conflicts never destroy data.** Divergent edits produce a `filename (conflicted copy).ext`
   alongside the original, matching native-client behaviour.
