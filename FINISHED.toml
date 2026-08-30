@@ -17,6 +17,50 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "delete-the-stale-state-backup-once-sync-is-healthy"
+title = "Delete the stale state backup once sync is healthy"
+description = "Remove /tmp/dbsync-state-backup-1788055350.json after the sync is confirmed healthy; it was kept in case the deletion-propagation scare recurred."
+status = "finished"
+level = "task"
+category = "chore"
+created = 2026-08-30
+completed = 2026-08-30
+tags = []
+
+[[task]]
+id = "verify-the-28-previously-failed-paths-against-disk"
+title = "Verify the 28 previously failed paths against disk"
+description = "Check every path in /tmp/failed-paths.txt exists locally with plausible size; re-request any that do not with dbsync retry."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-30
+completed = 2026-08-30
+tags = []
+
+[[task]]
+id = "confirm-the-long-filename-downloads-now-succeed"
+title = "Confirm the long-filename downloads now succeed"
+description = "Once the pull settles, run dbsync failures and check that the three ENAMETOOLONG entries have downloaded rather than sitting as permanent failures."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-30
+completed = 2026-08-30
+tags = []
+
+[[task]]
+id = "deploy-the-partial-name-shortening-fix"
+title = "Deploy the partial-name shortening fix"
+description = "Rebuild the container and redeploy so 237603e is live; confirm a clean startup in docker logs dbsync-dbsync-1."
+status = "finished"
+level = "task"
+category = "chore"
+created = 2026-08-30
+completed = 2026-08-30
+tags = []
+
+[[task]]
 id = "persist-sync-state-incrementally-instead-of-rewriting-the-whole-file"
 title = "Persist sync state incrementally instead of rewriting the whole file"
 description = "StateDb::save serializes and writes every tracked entry on each call, which is what makes mid-page checkpointing expensive. An append-only journal or a keyed store would make a checkpoint cost the size of the change rather than the size of the account, removing the O(n^2) shape at its root rather than tuning around it."
