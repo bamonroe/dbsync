@@ -60,6 +60,19 @@ pub struct SyncState {
     #[serde(default)]
     aliases: BTreeMap<String, String>,
 
+    /// The true casing of every folder, keyed by its lowercased path relative to
+    /// the sync root.
+    ///
+    /// Dropbox only capitalises the *last* component of a `path_display`: ask it
+    /// for a file and the folders above it can come back lowercased, while the
+    /// folder's own entry names it correctly. Creating a deep file's parents
+    /// straight from its display path therefore bakes in the wrong case, which
+    /// a case-sensitive filesystem then keeps forever. Folder entries are
+    /// recorded here as they arrive and every later path is rebuilt through
+    /// them. See [`crate::reconcile::dircase`].
+    #[serde(default)]
+    folders: BTreeMap<String, String>,
+
     /// What has changed since the last save, so a save can write the deltas
     /// instead of the whole file. Not serialised: it describes the difference
     /// between this state and what is on disk, which is meaningless once it
@@ -86,6 +99,7 @@ impl SyncState {
             entries: BTreeMap::new(),
             failures: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            folders: BTreeMap::new(),
             pending: Vec::new(),
         }
     }
@@ -170,6 +184,31 @@ impl SyncState {
             .insert(relative.to_lowercase(), display_path.to_string());
     }
 
+    /// Remember a folder's true casing. `canonical` is its path relative to the
+    /// sync root, already rebuilt through the folders above it.
+    ///
+    /// Recording a folder whose case has not changed is a no-op, so a re-list
+    /// does not fill the journal with entries that say nothing.
+    pub fn record_folder_case(&mut self, canonical: &str) {
+        let key = canonical.to_lowercase();
+        if self.folders.get(&key).is_some_and(|held| held == canonical) {
+            return;
+        }
+        self.pending
+            .push(Record::FolderCase(key.clone(), canonical.to_string()));
+        self.folders.insert(key, canonical.to_string());
+    }
+
+    /// The true casing of a folder, given its lowercased relative path.
+    pub fn folder_case(&self, lowercased: &str) -> Option<&str> {
+        self.folders.get(lowercased).map(String::as_str)
+    }
+
+    /// How many folders have a recorded casing.
+    pub fn folder_case_count(&self) -> usize {
+        self.folders.len()
+    }
+
     /// The remote path of a shortened local file, if this is one.
     pub fn alias_for(&self, relative: &str) -> Option<&str> {
         self.aliases
@@ -250,6 +289,9 @@ impl SyncState {
             }
             Record::Alias(relative, display_path) => {
                 self.aliases.insert(relative, display_path);
+            }
+            Record::FolderCase(key, canonical) => {
+                self.folders.insert(key, canonical);
             }
             Record::Cursor(cursor) => self.cursor = cursor,
         }

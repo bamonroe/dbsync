@@ -53,6 +53,8 @@ pub enum Record {
     FailureGone(String),
     /// A shortened local name was mapped to its remote path.
     Alias(String, String),
+    /// A folder's true casing, by lowercased relative path.
+    FolderCase(String, String),
     /// The cursor moved, or was dropped.
     Cursor(Option<String>),
 }

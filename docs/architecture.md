@@ -268,6 +268,17 @@ Three rules hold the whole thing together:
   shortened name no longer says what the remote one was, the state carries an `aliases` index
   from local path to remote display path, and the upload direction consults it first —
   otherwise an edit would be uploaded as a second, wrongly-named remote file.
+- **Only a folder's own entry says how it is capitalised.** Dropbox returns a `path_lower`
+  and a `path_display`, but `path_display` is dependable only for its **last** component:
+  ask for a deeply nested file and the folders above it can come back lowercased, while the
+  same folder's own entry names it correctly. Creating a file's parents straight from its
+  display path therefore froze the wrong case onto a case-sensitive filesystem — Dropbox
+  never noticed, because to Dropbox the two names are one folder. `dircase::canonical`
+  rebuilds every path through the folder casings recorded in `SyncState::folders` as their
+  entries arrive; a listing hands out a folder before its contents, which is what makes that
+  ordering work. A folder already on disk under the wrong name is *renamed* rather than
+  duplicated (`apply::recase_existing`), except when both names exist — that is a collision
+  between real files, not a rename to make silently.
 - **The scratch name pays for its own suffix, not the real one.** A download writes to a
   `.<rev>.dbsync-partial` sibling, and the chunk map is named off *that*, so the scratch name
   is longer than the file's — a name sitting at exactly 255 bytes was legal at rest and still
@@ -414,6 +425,7 @@ implementation yet.
 | `src/reconcile/page.rs` | Applying one page, overlapping the downloads it safely can | done |
 | `src/state/journal.rs` | The append-only journal of state changes, and folding it back into the snapshot | done |
 | `src/state/requests.rs` | The retry-request queue the CLI writes and the daemon consumes | done |
+| `src/reconcile/dircase.rs` | Rebuilding a remote path through the folder casings Dropbox only states on the folders' own entries | done |
 | `src/reconcile/listing.rs` | Retrying wrappers around the two listing calls, so one dropped connection does not discard a full listing | done |
 | `src/reconcile/retry.rs` | Choosing and resolving previously-failed entries for another attempt | done |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |

@@ -24,6 +24,7 @@
 mod apply;
 pub mod budget;
 mod conflict;
+pub(crate) mod dircase;
 mod listing;
 mod local;
 mod page;

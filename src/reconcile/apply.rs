@@ -17,6 +17,7 @@ use crate::error::{Error, Result};
 use crate::state::{SyncState, entry_for_local_file, key_for};
 
 use super::conflict;
+use super::dircase;
 use super::paths::PathMapper;
 use super::source::RemoteSource;
 
@@ -70,8 +71,9 @@ enum Action<'a> {
         file: &'a RemoteFile,
         preserve: bool,
     },
-    /// Create a directory.
-    Directory,
+    /// Create a directory, and remember the casing it carries — this entry is
+    /// the only place Dropbox states it reliably. See [`super::dircase`].
+    Directory { canonical: String },
     /// Remove this path and forget everything under it.
     Delete { display_path: &'a str },
 }
@@ -96,10 +98,15 @@ pub(crate) fn decide<'a>(
     state: &SyncState,
     entry: &'a RemoteEntry,
 ) -> Result<Plan<'a>> {
-    let local = paths.to_local(entry.display_path())?;
+    // Dropbox only capitalises the last component, so the folders above it are
+    // rebuilt from their own entries before this becomes a path on disk.
+    let display = dircase::canonical(state, entry.display_path());
+    let local = paths.to_local(&display)?;
     let action = match entry {
         RemoteEntry::File(file) => decide_file(state, file, &local)?,
-        RemoteEntry::Folder(_) => Action::Directory,
+        RemoteEntry::Folder(_) => Action::Directory {
+            canonical: dircase::relative(&display).to_string(),
+        },
         RemoteEntry::Deleted(_) => Action::Delete {
             display_path: entry.display_path(),
         },
@@ -159,7 +166,11 @@ pub(crate) async fn fetch<S: RemoteSource>(
                 false => Applied::Downloaded,
             })
         }
-        Action::Directory => {
+        Action::Directory { .. } => {
+            if let Some(parent) = plan.local.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            recase_existing(&plan.local).await?;
             tokio::fs::create_dir_all(&plan.local).await?;
             Ok(Applied::Directory)
         }
@@ -183,7 +194,44 @@ pub(crate) fn record(state: &mut SyncState, plan: &Plan<'_>) -> Result<()> {
             state.insert(entry);
         }
         Action::Delete { display_path } => forget_subtree(state, display_path),
-        Action::Skip | Action::Directory => {}
+        Action::Directory { canonical } => state.record_folder_case(canonical),
+        Action::Skip => {}
+    }
+    Ok(())
+}
+
+/// Rename a sibling that differs from `wanted` only in case.
+///
+/// Folders created before their casing was known are still on disk under the
+/// wrong name, and on a case-sensitive filesystem making the right one simply
+/// leaves two. Renaming moves the contents across in one step instead.
+///
+/// Does nothing when the correct name already exists — that means both are
+/// present, and merging them is not a rename but a decision about colliding
+/// files, which belongs to whoever made them.
+async fn recase_existing(wanted: &Path) -> Result<()> {
+    if tokio::fs::symlink_metadata(wanted).await.is_ok() {
+        return Ok(());
+    }
+    let (Some(parent), Some(name)) = (wanted.parent(), wanted.file_name()) else {
+        return Ok(());
+    };
+    let name = name.to_string_lossy().to_lowercase();
+    let mut listing = tokio::fs::read_dir(parent).await?;
+    while let Some(sibling) = listing.next_entry().await? {
+        if !sibling.file_type().await?.is_dir() {
+            continue;
+        }
+        if sibling.file_name().to_string_lossy().to_lowercase() != name {
+            continue;
+        }
+        tracing::info!(
+            from = %sibling.path().display(),
+            to = %wanted.display(),
+            "correcting a folder's capitalisation"
+        );
+        tokio::fs::rename(sibling.path(), wanted).await?;
+        return Ok(());
     }
     Ok(())
 }
@@ -346,6 +394,37 @@ mod tests {
             fixture.remote.sizes_asked(),
             vec![("/a.txt".to_string(), 5)]
         );
+    }
+
+    /// A folder created before its casing was known must be renamed, not
+    /// left beside a second directory holding nothing.
+    #[tokio::test]
+    async fn a_wrongly_cased_folder_is_renamed_rather_than_duplicated() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrong = dir.path().join("jri paper");
+        tokio::fs::create_dir_all(&wrong).await.unwrap();
+        tokio::fs::write(wrong.join("a.txt"), b"hi").await.unwrap();
+
+        let right = dir.path().join("JRI paper");
+        recase_existing(&right).await.unwrap();
+
+        assert!(!wrong.exists(), "the wrongly-cased folder was left behind");
+        assert_eq!(tokio::fs::read(right.join("a.txt")).await.unwrap(), b"hi");
+    }
+
+    /// Both names present is a collision, not a rename: merging them would be
+    /// deciding which of two real files wins.
+    #[tokio::test]
+    async fn a_folder_already_correctly_cased_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrong = dir.path().join("notes");
+        let right = dir.path().join("Notes");
+        tokio::fs::create_dir_all(&wrong).await.unwrap();
+        tokio::fs::create_dir_all(&right).await.unwrap();
+
+        recase_existing(&right).await.unwrap();
+
+        assert!(wrong.exists() && right.exists());
     }
 
     #[tokio::test]
@@ -592,7 +671,10 @@ mod tests {
                     display_path: "/gone.txt"
                 }
             ));
-            assert!(matches!(plan_for(&fixture, &dir).action, Action::Directory));
+            assert!(matches!(
+                plan_for(&fixture, &dir).action,
+                Action::Directory { .. }
+            ));
         }
 
         /// A path that escapes the sync root is rejected in the decision, so no
