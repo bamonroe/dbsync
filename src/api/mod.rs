@@ -13,6 +13,7 @@ mod chunkmap;
 mod chunks;
 mod client;
 mod download;
+mod get_metadata;
 mod list_folder;
 mod metadata;
 mod partial;

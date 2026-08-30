@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::path::Path;
 
-use crate::api::{Allowance, ApiClient, ListFolderPage};
+use crate::api::{Allowance, ApiClient, ListFolderPage, RemoteEntry};
 use crate::error::Result;
 
 /// Everything the remote-to-local direction needs from Dropbox.
@@ -20,6 +20,12 @@ pub trait RemoteSource {
         &self,
         cursor: &str,
     ) -> impl Future<Output = Result<ListFolderPage>> + Send;
+
+    /// Look up one path's current metadata.
+    ///
+    /// Retrying a single failed entry needs this: the page it arrived on is
+    /// long consumed, and a Dropbox cursor cannot be rewound to it.
+    fn get_metadata(&self, path: &str) -> impl Future<Output = Result<RemoteEntry>> + Send;
 
     /// Download revision `rev` of `remote_path`, atomically placing it at
     /// `dest`. The revision is what makes an interrupted download resumable.
@@ -47,6 +53,10 @@ impl RemoteSource for ApiClient {
         cursor: &str,
     ) -> impl Future<Output = Result<ListFolderPage>> + Send {
         ApiClient::list_folder_continue(self, cursor)
+    }
+
+    fn get_metadata(&self, path: &str) -> impl Future<Output = Result<RemoteEntry>> + Send {
+        ApiClient::get_metadata(self, path)
     }
 
     fn download_to(

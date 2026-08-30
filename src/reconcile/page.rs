@@ -159,11 +159,20 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
         applied: &mut usize,
     ) -> Result<()> {
         match outcome {
-            Ok(()) => *applied += 1,
+            Ok(()) => {
+                *applied += 1;
+                // A path that has now arrived is no longer missing. Clearing on
+                // every success is what keeps the failure list a list of things
+                // that are *currently* wrong rather than a history.
+                self.state.clear_failure(entry.display_path());
+            }
             // One bad path must not stall the whole stream; the cursor still
-            // advances, and a later change re-delivers the path.
+            // advances, and a later change re-delivers the path. But it is
+            // *recorded*, not merely logged: a warning scrolls away, and a file
+            // that failed to download is silently absent from disk otherwise.
             Err(error) => {
                 tracing::warn!(path = entry.display_path(), %error, "could not apply entry");
+                self.state.record_failure(entry.display_path(), &error);
                 return Ok(());
             }
         }

@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::api::{Allowance, ListFolderPage, RemoteFile, WriteMode};
+use crate::api::{Allowance, ListFolderPage, RemoteEntry, RemoteFile, WriteMode};
 use crate::error::{Error, Result};
 
 use super::sink::RemoteSink;
@@ -40,6 +40,12 @@ pub struct FakeRemote {
     /// Remote paths whose next `update(rev)` write is refused, the way Dropbox
     /// refuses one naming a revision that is no longer current.
     conflicts: Mutex<HashMap<String, usize>>,
+    /// Metadata a test has queued for `get_metadata`, keyed by lowercased path.
+    /// A path with no entry here is reported gone, which is what a retry of a
+    /// since-deleted file should see.
+    metadata: Mutex<HashMap<String, RemoteEntry>>,
+    /// Every path `get_metadata` was asked about, in order.
+    metadata_asked: Mutex<Vec<String>>,
 }
 
 impl FakeRemote {
@@ -133,6 +139,19 @@ impl FakeRemote {
     pub fn cursors_used(&self) -> Vec<String> {
         self.cursors_used.lock().unwrap().clone()
     }
+
+    /// Queue what `get_metadata` should answer for a path.
+    pub fn set_metadata(&self, entry: RemoteEntry) {
+        self.metadata
+            .lock()
+            .unwrap()
+            .insert(entry.display_path().to_lowercase(), entry);
+    }
+
+    /// Every path `get_metadata` was asked about, in order.
+    pub fn metadata_asked(&self) -> Vec<String> {
+        self.metadata_asked.lock().unwrap().clone()
+    }
 }
 
 fn next(queue: &Mutex<VecDeque<Result<ListFolderPage>>>, what: &str) -> Result<ListFolderPage> {
@@ -146,6 +165,19 @@ fn next(queue: &Mutex<VecDeque<Result<ListFolderPage>>>, what: &str) -> Result<L
 impl RemoteSource for FakeRemote {
     async fn list_folder(&self, _path: &str) -> Result<ListFolderPage> {
         next(&self.listings, "listing")
+    }
+
+    async fn get_metadata(&self, path: &str) -> Result<RemoteEntry> {
+        self.metadata_asked.lock().unwrap().push(path.to_string());
+        self.metadata
+            .lock()
+            .unwrap()
+            .get(&path.to_lowercase())
+            .cloned()
+            .ok_or_else(|| Error::Api {
+                status: 409,
+                message: format!("path/not_found: {path}"),
+            })
     }
 
     async fn list_folder_continue(&self, cursor: &str) -> Result<ListFolderPage> {

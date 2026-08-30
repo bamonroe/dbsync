@@ -213,6 +213,21 @@ Three rules hold the whole thing together:
   time. The interval is one entry per 64 tracked, clamped to [100, 1000] — the cap bounds what
   a crash can cost, and re-applying entries is idempotent and cheap. Removing the whole-file
   rewrite is the root fix and is tracked in `TODO.toml`.
+- **A failed entry is recorded, not just logged.** One bad path must not stall the stream, so
+  a failure is stepped over and the cursor still advances. That alone would make the file
+  *silently absent*: the pull reports success, the log line scrolls away, and nothing
+  re-delivers the path because the cursor has moved past its page — the file is missing and
+  no one knows. So every failure is written into `state.json` alongside the entries
+  (`src/state/failures.rs`), with its error, attempt count and first sighting, and the daemon
+  warns with the count after each pull. `dbsync failures` lists them. Failures are classified
+  **transient** or **permanent**, and the classification is deliberately biased: only a path
+  the filesystem cannot represent (`ENAMETOOLONG`) is called permanent, and everything else is
+  retried, because a wasted request is cheaper than a file that is never fetched again.
+  `Reconciler::pull` re-attempts the transient ones through `files/get_metadata`, one path at
+  a time, since the page they came from is long consumed and a cursor cannot be rewound. The
+  candidate list is taken *before* the listing, so an entry that fails during this pull waits
+  for the next one instead of being retried seconds after it failed; a path deleted remotely
+  in the meantime is resolved rather than retried forever.
 - **A cursor reset is routine, not an error.** `pull` catches it, drops the cursor, and
   re-lists. The re-list *reconciles*: entries whose `rev` still matches are skipped, and
   anything in the state the listing does not mention was deleted remotely while we were
@@ -327,6 +342,7 @@ implementation yet.
 | `src/state/mod.rs` | Sync-state entry point; builds entries from local files | done |
 | `src/state/entry.rs` | Per-file record and its change-detection predicates | done |
 | `src/state/db.rs` | `SyncState` plus atomic load/save | done |
+| `src/state/failures.rs` | Recording entries that could not be applied, and classifying them | done |
 | `src/auth/pkce.rs` | RFC 7636 verifier/challenge generation | done |
 | `src/auth/oauth.rs` | Authorize URL, code exchange, refresh | done |
 | `src/auth/loopback.rs` | One-shot loopback listener for the redirect | done |
@@ -334,6 +350,7 @@ implementation yet.
 | `src/auth/provider.rs` | Access-token cache, expiry skew, refresh-on-401 | done |
 | `src/api/client.rs` | Authenticated HTTP client, error mapping, refresh-on-401 | done |
 | `src/api/metadata.rs` | The `.tag`-tagged file/folder/tombstone shapes | done |
+| `src/api/get_metadata.rs` | Metadata for one path, which a retry needs | done |
 | `src/api/list_folder.rs` | `list_folder` and `list_folder/continue` | done |
 | `src/api/download.rs` | Streaming download with an atomic rename into place; picks whole-file or chunked | done |
 | `src/api/range.rs` | The byte range a download asks for, and verifying the reply honoured it | done |
@@ -351,6 +368,7 @@ implementation yet.
 | `src/reconcile/budget.rs` | Byte-budget admission control for parallel downloads | done |
 | `src/reconcile/schedule.rs` | Splitting a page into serial and concurrent steps | done |
 | `src/reconcile/page.rs` | Applying one page, overlapping the downloads it safely can | done |
+| `src/reconcile/retry.rs` | Choosing and resolving previously-failed entries for another attempt | done |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |
 | `src/watcher/debounce.rs` | Per-path quiet-period coalescing | done |
 | `src/daemon/mod.rs` | Building the components from config and the startup order | done |

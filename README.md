@@ -172,6 +172,37 @@ the long-poll endpoint and watches the local directory. Logs go to stdout; raise
 with `RUST_LOG=debug`. `SIGINT` (Ctrl-C) or `SIGTERM` stops it after the operation in flight
 finishes, so the state file is never left describing a half-applied change.
 
+### Files that failed to sync
+
+A download can fail without the sync failing — a dropped connection, a Dropbox 5xx, or a
+filename longer than Linux allows. When that happens the entry is **recorded**, not just
+logged, because a failed download is otherwise invisible: the pull reports success and the
+file is simply not on disk.
+
+```sh
+dbsync failures                # everything currently missing locally
+dbsync failures --permanent    # only the ones that need you to act
+dbsync failures --retryable    # only the ones a retry may still fix
+```
+
+Each line shows the path, the last error, and how many times it has been attempted. The record
+lives in `state.json`, so it survives a restart, and the daemon logs a warning naming the
+count after each pull rather than finishing quietly.
+
+Failures are split into two kinds:
+
+- **Retryable** — a network error or a server-side fault. Every pull re-attempts these
+  automatically, looking each path up individually, so a transient problem heals itself
+  without you doing anything. An entry that failed during *this* pull waits for the next one
+  rather than being hammered immediately. A path deleted from Dropbox in the meantime is
+  dropped from the list instead of being retried forever.
+- **Permanent** — currently only a path the local filesystem cannot represent
+  (`File name too long`). Retrying cannot help, so these are never re-attempted and are listed
+  first. Renaming the file in Dropbox is the fix; it then syncs normally on the next pull.
+
+A climbing `attempts` count on a retryable entry is the signal that something is wrong beyond
+bad luck.
+
 ### Conflicts
 
 If a file is edited locally and on Dropbox at the same time, dbsync keeps both. Your local

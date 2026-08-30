@@ -32,7 +32,7 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::notify::{self, LongpollClient};
 use crate::reconcile::{self, PathMapper, Reconciler};
-use crate::state::StateDb;
+use crate::state::{FailureKind, StateDb, SyncState};
 use crate::watcher;
 
 /// Run the sync daemon until a termination signal arrives.
@@ -55,6 +55,7 @@ pub async fn run(config: &Config) -> Result<Summary> {
         resynced = first.resynced,
         "initial pull complete"
     );
+    report_failures(reconciler.state());
 
     let cursor = reconciler.cursor().unwrap_or_default().to_string();
     let poller = LongpollClient::new(config.longpoll.timeout_secs)?;
@@ -110,4 +111,26 @@ fn build(config: &Config) -> Result<Reconciler<ApiClient>> {
         "download budget"
     );
     Ok(Reconciler::with_budget(api, paths, db, state, budget))
+}
+
+/// Say out loud what is missing, so a failed file is never silently absent.
+///
+/// A warning rather than info, because "the pull finished" and "everything
+/// arrived" are different claims and only the second one is what an operator
+/// assumes. Silent when there is nothing missing.
+fn report_failures(state: &SyncState) {
+    let total = state.failure_count();
+    if total == 0 {
+        return;
+    }
+    let permanent = state
+        .failures()
+        .filter(|f| f.kind == FailureKind::Permanent)
+        .count();
+    tracing::warn!(
+        failed = total,
+        permanent,
+        retryable = total - permanent,
+        "some entries are missing locally; run `dbsync failures` to list them"
+    );
 }

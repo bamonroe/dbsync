@@ -27,6 +27,7 @@ mod conflict;
 mod local;
 mod page;
 mod paths;
+pub mod retry;
 pub mod schedule;
 mod sink;
 mod source;
@@ -57,6 +58,8 @@ pub struct Pull {
     pub applied: usize,
     /// Whether the cursor had to be rebuilt from a full listing.
     pub resynced: bool,
+    /// What the retry pass over previously-failed entries managed.
+    pub retried: retry::Retried,
 }
 
 /// What one push did, tallied across a batch.
@@ -116,6 +119,21 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
     /// With no cursor — a first run — this is a full listing. A cursor Dropbox
     /// has invalidated is handled the same way, transparently.
     pub async fn pull(&mut self) -> Result<Pull> {
+        // Taken *before* the listing: an entry that fails during this pull has
+        // just been attempted, and trying it again seconds later would only
+        // repeat whatever went wrong. It waits for the next pull instead.
+        let candidates = retry::candidates(&self.state);
+
+        let mut pull = self.pull_listing().await?;
+        // After the listing, not instead of it: a previously failed entry is
+        // not in any page this pull will see, because the cursor has already
+        // moved past it.
+        pull.retried = self.retry_failures(candidates).await?;
+        Ok(pull)
+    }
+
+    /// The listing half of a pull, before failed entries are re-attempted.
+    async fn pull_listing(&mut self) -> Result<Pull> {
         let Some(cursor) = self.state.cursor().map(str::to_string) else {
             return self.resync().await;
         };
@@ -127,6 +145,65 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
             }
             other => other,
         }
+    }
+
+    /// Re-attempt every entry recorded as having failed transiently.
+    ///
+    /// Each path is looked up individually: the page it arrived on is long
+    /// consumed and a Dropbox cursor cannot be rewound to it. A path that has
+    /// since been deleted remotely is resolved rather than retried, and a
+    /// lookup that fails again simply stays on the list for next time — the
+    /// record outliving the process is what stops a file going quietly missing.
+    async fn retry_failures(&mut self, candidates: Vec<String>) -> Result<retry::Retried> {
+        // A path that has since arrived by ordinary means is no longer failed.
+        let candidates: Vec<_> = candidates
+            .into_iter()
+            .filter(|path| self.state.is_failed(path))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(retry::Retried::default());
+        }
+        tracing::info!(count = candidates.len(), "retrying failed entries");
+
+        let mut retried = retry::Retried {
+            attempted: candidates.len(),
+            ..retry::Retried::default()
+        };
+        for path in candidates {
+            let looked_up = self.source.get_metadata(&path).await;
+            match retry::resolve(&mut self.state, &path, &looked_up) {
+                retry::Outcome::Vanished => {
+                    tracing::info!(path, "failed entry is gone remotely; nothing to recover");
+                    retried.vanished += 1;
+                }
+                retry::Outcome::StillFailing => {}
+                retry::Outcome::Fetchable => {
+                    let entry = looked_up.expect("fetchable implies a successful lookup");
+                    // One entry at a time, through the ordinary applier, so a
+                    // retry is subject to the same budget and the same
+                    // clear-on-success as any other fetch.
+                    let applied = page::Page {
+                        source: &self.source,
+                        paths: &self.paths,
+                        state: &mut self.state,
+                        db: &self.db,
+                        admission: &self.admission,
+                    }
+                    .apply(std::slice::from_ref(&entry))
+                    .await?;
+                    retried.recovered += applied;
+                }
+            }
+        }
+        self.db.save(&self.state)?;
+        tracing::info!(
+            attempted = retried.attempted,
+            recovered = retried.recovered,
+            vanished = retried.vanished,
+            still_failing = self.state.failure_count(),
+            "retry pass complete"
+        );
+        Ok(retried)
     }
 
     /// Drain `list_folder/continue` from `cursor` until there is no more.
@@ -284,6 +361,62 @@ mod tests {
             path_lower: path.to_lowercase(),
             path_display: Some(path.to_string()),
         })
+    }
+
+    /// The point of the whole failure record: a file that failed to download
+    /// is silently absent from disk, and nothing in the change stream will
+    /// re-deliver it, because the cursor has already moved past its page. The
+    /// retry pass is what closes that hole.
+    #[tokio::test]
+    async fn a_failed_entry_is_retried_on_the_next_pull_and_recovered() {
+        let fixture = Fixture::new(Some("c0"));
+        let mut applier = fixture.applier;
+
+        // The entry is listed but the account cannot serve it yet, so the
+        // download fails and the file never lands.
+        applier
+            .source
+            .queue_continue(page(vec![file("/late.txt", "r1")], "c1", false));
+        let pull = applier.pull().await.unwrap();
+        assert_eq!(pull.applied, 0, "the download failed");
+        assert_eq!(applier.state().failure_count(), 1, "and was recorded");
+
+        // Now the content exists, and the path resolves on lookup.
+        applier.source.put("/late.txt", b"here at last");
+        applier.source.set_metadata(file("/late.txt", "r1"));
+        applier.source.queue_continue(page(vec![], "c2", false));
+
+        let pull = applier.pull().await.unwrap();
+        assert_eq!(pull.retried.attempted, 1);
+        assert_eq!(pull.retried.recovered, 1);
+        assert_eq!(
+            applier.state().failure_count(),
+            0,
+            "recovered entries stop being reported as missing"
+        );
+        assert_eq!(applier.source.metadata_asked(), vec!["/late.txt"]);
+    }
+
+    /// A path deleted remotely between the failure and the retry is resolved,
+    /// not retried forever: there is nothing left to fetch.
+    #[tokio::test]
+    async fn a_failed_entry_that_vanished_stops_being_retried() {
+        let fixture = Fixture::new(Some("c0"));
+        let mut applier = fixture.applier;
+
+        applier
+            .source
+            .queue_continue(page(vec![file("/gone.txt", "r1")], "c1", false));
+        applier.pull().await.unwrap();
+        assert_eq!(applier.state().failure_count(), 1);
+
+        applier.source.set_metadata(tombstone("/gone.txt"));
+        applier.source.queue_continue(page(vec![], "c2", false));
+
+        let pull = applier.pull().await.unwrap();
+        assert_eq!(pull.retried.vanished, 1);
+        assert_eq!(pull.retried.recovered, 0);
+        assert_eq!(applier.state().failure_count(), 0);
     }
 
     fn page(entries: Vec<RemoteEntry>, cursor: &str, has_more: bool) -> Result<ListFolderPage> {

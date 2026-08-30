@@ -31,6 +31,15 @@ enum Command {
     },
     /// Load the configuration and report what it resolved to, then exit.
     Check,
+    /// List entries that could not be synced and are missing locally.
+    Failures {
+        /// Show only the ones a retry could still fix.
+        #[arg(long, conflicts_with = "permanent")]
+        retryable: bool,
+        /// Show only the ones that will never succeed without intervention.
+        #[arg(long)]
+        permanent: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -73,6 +82,15 @@ async fn main() -> anyhow::Result<()> {
             );
             println!("longpoll:    {}s", config.longpoll.timeout_secs);
             println!("debounce:    {}ms", config.watcher.debounce_ms);
+            Ok(())
+        }
+        Command::Failures {
+            retryable,
+            permanent,
+        } => {
+            let db = dbsync::state::StateDb::default_location()?;
+            let state = db.load()?;
+            print_failures(&state, retryable, permanent);
             Ok(())
         }
         Command::Run => {
@@ -119,5 +137,47 @@ async fn main() -> anyhow::Result<()> {
                 },
             }
         }
+    }
+}
+
+/// Print the recorded failures, newest trouble first within each kind.
+///
+/// Permanent entries are listed first and labelled: they are the ones that will
+/// still be missing tomorrow unless someone acts, so burying them under a list
+/// of things the next pull will fix by itself would defeat the point.
+fn print_failures(state: &dbsync::state::SyncState, retryable: bool, permanent: bool) {
+    use dbsync::state::FailureKind;
+
+    let wanted = |kind: FailureKind| match (retryable, permanent) {
+        (false, false) => true,
+        (true, _) => kind == FailureKind::Transient,
+        (_, true) => kind == FailureKind::Permanent,
+    };
+
+    let mut shown = 0;
+    for kind in [FailureKind::Permanent, FailureKind::Transient] {
+        if !wanted(kind) {
+            continue;
+        }
+        for failure in state.failures().filter(|f| f.kind == kind) {
+            let label = match kind {
+                FailureKind::Permanent => "permanent",
+                FailureKind::Transient => "retryable",
+            };
+            println!(
+                "{label}  attempts={}  {}\n           {}",
+                failure.attempts, failure.display_path, failure.error
+            );
+            shown += 1;
+        }
+    }
+
+    if shown == 0 {
+        println!("no recorded failures — everything the state knows about is on disk");
+    } else {
+        println!(
+            "\n{shown} entr{} missing locally",
+            if shown == 1 { "y" } else { "ies" }
+        );
     }
 }

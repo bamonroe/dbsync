@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::entry::SyncEntry;
+use super::failures::{self, Failure};
 use crate::error::{Error, Result};
 
 /// Bumped when the on-disk shape changes incompatibly. A state file from a
@@ -38,6 +39,14 @@ pub struct SyncState {
     /// casing is preserved in [`SyncEntry::display_path`].
     #[serde(default)]
     entries: BTreeMap<String, SyncEntry>,
+
+    /// Entries that could not be applied, keyed the same way as `entries`.
+    ///
+    /// Kept in the state file rather than only in the log so that "what is
+    /// missing locally?" is a question with an answer after a restart. See
+    /// [`super::failures`].
+    #[serde(default)]
+    failures: BTreeMap<String, Failure>,
 }
 
 fn default_version() -> u32 {
@@ -56,6 +65,7 @@ impl SyncState {
             version: STATE_VERSION,
             cursor: None,
             entries: BTreeMap::new(),
+            failures: BTreeMap::new(),
         }
     }
 
@@ -103,6 +113,50 @@ impl SyncState {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Remember that `path` could not be applied, folding into any existing
+    /// record so the attempt count and first sighting survive.
+    pub fn record_failure(&mut self, path: &str, error: &Error) {
+        let kind = failures::classify(error);
+        let text = error.to_string();
+        self.failures
+            .entry(key_for(path))
+            .and_modify(|failure| failure.record_again(text.clone(), kind))
+            .or_insert_with(|| Failure::new(path, text, kind));
+    }
+
+    /// Forget any failure for `path`. Called on every success, so a file that
+    /// later arrives stops being reported as missing.
+    pub fn clear_failure(&mut self, path: &str) -> Option<Failure> {
+        self.failures.remove(&key_for(path))
+    }
+
+    /// Record a prepared failure verbatim. For tests and for migrating a
+    /// record between keys; ordinary recording goes through
+    /// [`Self::record_failure`], which folds attempts and timestamps.
+    pub fn insert_failure(&mut self, path: &str, failure: Failure) {
+        self.failures.insert(key_for(path), failure);
+    }
+
+    /// Every recorded failure, in stable key order.
+    pub fn failures(&self) -> impl Iterator<Item = &Failure> {
+        self.failures.values()
+    }
+
+    /// Whether `path` is currently recorded as failed.
+    pub fn is_failed(&self, path: &str) -> bool {
+        self.failures.contains_key(&key_for(path))
+    }
+
+    /// How many entries are recorded as failed.
+    pub fn failure_count(&self) -> usize {
+        self.failures.len()
+    }
+
+    /// The paths worth trying again, newest classification respected.
+    pub fn retryable_failures(&self) -> impl Iterator<Item = &Failure> {
+        self.failures.values().filter(|f| f.kind.is_retryable())
     }
 }
 

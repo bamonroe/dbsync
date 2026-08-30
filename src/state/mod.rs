@@ -17,10 +17,12 @@
 
 mod db;
 mod entry;
+pub mod failures;
 pub mod hash;
 
 pub use db::{StateDb, SyncState, key_for};
 pub use entry::{SyncEntry, from_nanos, to_nanos};
+pub use failures::{Failure, FailureKind};
 
 use std::path::Path;
 
