@@ -91,7 +91,7 @@ fn build(config: &Config) -> Result<Reconciler<ApiClient>> {
 
     let oauth = OauthClient::new(config.app_key.clone())?;
     let tokens = Arc::new(TokenProvider::new(oauth, TokenStore::default_location()?));
-    let api = ApiClient::new(tokens)?;
+    let api = ApiClient::new(tokens)?.with_chunking(config.download.chunking());
 
     let paths = PathMapper::new(&config.local_root, &config.remote_root);
     let db = StateDb::default_location()?;

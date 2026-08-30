@@ -33,3 +33,22 @@ min_concurrency = 4
 # account of many tiny files on a fast link; past ~16 the extra sockets tend to
 # buy throughput back in rate limits. Must be at least min_concurrency.
 max_concurrency = 16
+
+# Files at least this large are fetched as several byte ranges at once, rather
+# than on one stream. Below it the extra round trips cost more than the
+# parallelism saves. Must be at least chunk_size.
+chunk_min_size = 8388608
+
+# The nominal size of each range. Smaller chunks refetch more cheaply after an
+# error; larger ones spend less time on round trips. Must be at least 1.
+chunk_size = 8388608
+
+# The most ranges one file is ever split into. Past this the chunk size grows
+# instead of the count, so a very large file stays a manageable plan. Must be
+# at least 1.
+max_chunks = 64
+
+# The most ranges of a *single* file in flight at once. A file may only spend
+# the bytes its own admission reserved, so this is a ceiling rather than a
+# target: it never multiplies with max_concurrency. Must be at least 1.
+chunk_concurrency = 8

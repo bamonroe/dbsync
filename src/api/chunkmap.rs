@@ -207,6 +207,7 @@ mod tests {
             min_size: 100,
             chunk_size: 100,
             max_chunks: 16,
+            ..Chunking::default()
         }
     }
 

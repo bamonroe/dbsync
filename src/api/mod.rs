@@ -19,7 +19,10 @@ mod partial;
 mod range;
 mod upload;
 
-pub use chunks::Allowance;
+pub use chunks::{
+    Allowance, Chunking, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_CHUNKS, DEFAULT_MAX_SLOTS,
+    DEFAULT_MIN_SIZE,
+};
 pub use client::ApiClient;
 pub use download::is_partial;
 pub use metadata::{ListFolderPage, RemoteDeleted, RemoteEntry, RemoteFile, RemoteFolder};

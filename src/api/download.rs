@@ -16,7 +16,7 @@ use futures_util::stream::{StreamExt, TryStreamExt, iter as stream_iter};
 use serde::Serialize;
 
 use super::chunkmap::MAP_SUFFIX;
-use super::chunks::{Allowance, ChunkPlan, Chunking};
+use super::chunks::{Allowance, ChunkPlan};
 use super::client::ApiClient;
 use super::partial::Partial;
 use super::range::ByteRange;
@@ -66,7 +66,7 @@ impl ApiClient {
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let plan = ChunkPlan::new(allowance.size, Chunking::default());
+        let plan = ChunkPlan::new(allowance.size, self.chunking());
         if !plan.is_whole_file() {
             return self
                 .download_chunked(remote_path, rev, allowance, plan, dest)
@@ -132,7 +132,7 @@ impl ApiClient {
         let path = partial_path(dest, rev);
         let partial = Partial::open(&path, plan).await?;
         let missing = partial.missing().await;
-        let slots = allowance.chunk_slots(plan.chunk_size());
+        let slots = allowance.chunk_slots(plan.chunk_size(), self.chunking());
         tracing::debug!(
             path = remote_path,
             chunks = plan.count(),

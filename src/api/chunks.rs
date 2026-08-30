@@ -35,10 +35,6 @@ pub struct Allowance {
     pub budgeted: u64,
 }
 
-/// However large the reservation, one file opening more sockets than this buys
-/// throughput back in rate limits.
-const MAX_CHUNK_SLOTS: usize = 8;
-
 impl Allowance {
     /// The whole file, unbudgeted — for callers with no admission control of
     /// their own, such as tests and one-shot fetches.
@@ -49,35 +45,42 @@ impl Allowance {
         }
     }
 
-    /// How many chunks of `chunk_size` may be in flight at once.
+    /// How many chunks of `chunk_size` may be in flight at once, under
+    /// `limits`.
     ///
     /// Always at least one: a reservation smaller than a chunk still has to
     /// make progress, it just makes it one chunk at a time.
-    pub(super) fn chunk_slots(self, chunk_size: u64) -> usize {
+    pub(super) fn chunk_slots(self, chunk_size: u64, limits: Chunking) -> usize {
         let fits = self.budgeted / chunk_size.max(1);
-        (fits as usize).clamp(1, MAX_CHUNK_SLOTS)
+        (fits as usize).clamp(1, limits.max_slots.max(1))
     }
 }
 
 /// The limits a plan is built under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Chunking {
+pub struct Chunking {
     /// Files smaller than this are fetched whole, in one request.
     pub min_size: u64,
     /// The nominal length of every chunk but the last.
     pub chunk_size: u64,
     /// The most chunks one file may be split into.
     pub max_chunks: u32,
+    /// The most chunks of one file that may be in flight at once, however
+    /// many bytes that file reserved.
+    pub max_slots: usize,
 }
 
 /// Splitting below this buys nothing: the round trips cost more than the
 /// parallelism saves.
-pub(super) const DEFAULT_MIN_SIZE: u64 = 8 * 1024 * 1024;
+pub const DEFAULT_MIN_SIZE: u64 = 8 * 1024 * 1024;
 /// Big enough that a chunk is a meaningful amount of streaming, small enough
 /// that losing one to an error is cheap to refetch.
-pub(super) const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
+pub const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 /// Beyond this the plan and its bitmap grow faster than the parallelism helps.
-pub(super) const DEFAULT_MAX_CHUNKS: u32 = 64;
+pub const DEFAULT_MAX_CHUNKS: u32 = 64;
+/// However large the reservation, one file opening more sockets than this buys
+/// throughput back in rate limits.
+pub const DEFAULT_MAX_SLOTS: usize = 8;
 
 impl Default for Chunking {
     fn default() -> Self {
@@ -85,6 +88,7 @@ impl Default for Chunking {
             min_size: DEFAULT_MIN_SIZE,
             chunk_size: DEFAULT_CHUNK_SIZE,
             max_chunks: DEFAULT_MAX_CHUNKS,
+            max_slots: DEFAULT_MAX_SLOTS,
         }
     }
 }
@@ -94,7 +98,7 @@ impl Default for Chunking {
 /// A plan always has at least one chunk, even for an empty file — "fetch
 /// nothing" is not a case the download path should have to carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ChunkPlan {
+pub struct ChunkPlan {
     size: u64,
     chunk_size: u64,
     count: u32,
@@ -102,7 +106,7 @@ pub(super) struct ChunkPlan {
 
 impl ChunkPlan {
     /// Plan the fetch of a `size`-byte file under `limits`.
-    pub(super) fn new(size: u64, limits: Chunking) -> Self {
+    pub fn new(size: u64, limits: Chunking) -> Self {
         let chunk_size = limits.chunk_size.max(1);
         let max_chunks = u64::from(limits.max_chunks.max(1));
         if size < limits.min_size.max(1) || size <= chunk_size {
@@ -188,6 +192,7 @@ mod tests {
             min_size: 100,
             chunk_size: 100,
             max_chunks: 4,
+            ..Chunking::default()
         }
     }
 
@@ -279,6 +284,7 @@ mod tests {
                 min_size: 0,
                 chunk_size: 0,
                 max_chunks: 0,
+                max_slots: 0,
             },
         );
         assert_eq!(plan.count(), 1);
@@ -296,7 +302,7 @@ mod tests {
                 size: 1_000,
                 budgeted: 400
             }
-            .chunk_slots(100),
+            .chunk_slots(100, Chunking::default()),
             4
         );
         assert_eq!(
@@ -304,7 +310,7 @@ mod tests {
                 size: 1_000,
                 budgeted: 1_000
             }
-            .chunk_slots(100),
+            .chunk_slots(100, Chunking::default()),
             8
         );
     }
@@ -317,7 +323,7 @@ mod tests {
                 size: 1_000,
                 budgeted: 10
             }
-            .chunk_slots(100),
+            .chunk_slots(100, Chunking::default()),
             1
         );
         // A budget of nothing is still a budget for one chunk at a time.
@@ -326,7 +332,7 @@ mod tests {
                 size: 50,
                 budgeted: 0
             }
-            .chunk_slots(10),
+            .chunk_slots(10, Chunking::default()),
             1
         );
     }
@@ -338,7 +344,7 @@ mod tests {
             size: u64::MAX,
             budgeted: u64::MAX,
         };
-        assert_eq!(huge.chunk_slots(1), MAX_CHUNK_SLOTS);
+        assert_eq!(huge.chunk_slots(1, Chunking::default()), DEFAULT_MAX_SLOTS);
     }
 
     #[test]

@@ -67,6 +67,10 @@ The `[download]` section tunes that:
 | `budget_bytes`    | 64 MiB  | Total size of downloads allowed in flight at once.                  |
 | `min_concurrency` | 4       | Downloads admitted regardless of the budget, so one enormous file cannot serialise the small files behind it. |
 | `max_concurrency` | 16      | Hard cap on downloads in flight, however small the files.           |
+| `chunk_min_size`  | 8 MiB   | Files at least this large are fetched as several byte ranges at once, not one stream. |
+| `chunk_size`      | 8 MiB   | The nominal size of each range.                                     |
+| `max_chunks`      | 64      | The most ranges one file is ever split into; past this the ranges grow instead. |
+| `chunk_concurrency` | 8     | The most ranges of a *single* file in flight at once.               |
 
 When to change them:
 
@@ -76,9 +80,19 @@ When to change them:
   byte budget, so the count cap is what limits them. Past roughly 16 the extra sockets tend to
   buy throughput back in Dropbox rate limits, so raise it and measure rather than guessing.
 - **Downloads are stalling behind one huge file** — raise `min_concurrency`.
+- **One large file is slow on a fast link** — that is what the chunk keys are for. A single
+  stream runs at one connection's speed however large the byte budget, so a big file is split
+  into `chunk_size` ranges fetched `chunk_concurrency` at a time. The per-file limit does not
+  multiply with `max_concurrency`: a file may only spend the bytes its own admission reserved,
+  so `chunk_concurrency` is a ceiling on that share rather than a second pool of sockets.
+- **Lots of medium files being split pointlessly** — raise `chunk_min_size`. Splitting only
+  pays once a file is large enough that the extra round trips are lost in the transfer.
 
 `budget_bytes` of 0, `min_concurrency` of 0, or a `max_concurrency` below `min_concurrency`
 are refused at startup with an error, rather than leaving the daemon unable to admit anything.
+The chunk keys are checked the same way: `chunk_size`, `max_chunks` and `chunk_concurrency`
+must each be at least 1, and `chunk_min_size` at least `chunk_size` — a threshold below one
+chunk would split files that cannot usefully be split.
 
 Each key also has a `DBSYNC_`-prefixed environment override, which wins over the file — handy
 for tuning a running container without editing its config:

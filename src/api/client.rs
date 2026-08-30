@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use super::chunks::Chunking;
 use super::range::ByteRange;
 use crate::auth::TokenProvider;
 use crate::error::{Error, Result};
@@ -25,6 +26,9 @@ pub const CONTENT_HOST: &str = "https://content.dropboxapi.com/2";
 pub struct ApiClient {
     http: reqwest::Client,
     tokens: Arc<TokenProvider>,
+    /// How a large file is split for download. Carried here rather than read
+    /// per call: it is configuration, fixed for the life of the daemon.
+    chunking: Chunking,
 }
 
 impl ApiClient {
@@ -32,7 +36,19 @@ impl ApiClient {
         Ok(Self {
             http: reqwest::Client::builder().build()?,
             tokens,
+            chunking: Chunking::default(),
         })
+    }
+
+    /// Use `chunking` instead of the built-in defaults.
+    pub fn with_chunking(mut self, chunking: Chunking) -> Self {
+        self.chunking = chunking;
+        self
+    }
+
+    /// The chunk limits in force.
+    pub(super) fn chunking(&self) -> Chunking {
+        self.chunking
     }
 
     /// POST a JSON body to an RPC endpoint and decode the JSON reply.

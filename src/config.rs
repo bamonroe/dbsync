@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::api::{self, Chunking};
 use crate::error::{Error, Result};
 use crate::reconcile::{Budget, budget};
 
@@ -71,6 +72,22 @@ pub struct DownloadConfig {
     /// The hard cap on downloads in flight, whatever their size.
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: usize,
+
+    /// Files smaller than this are fetched whole, on one stream.
+    #[serde(default = "default_chunk_min_size")]
+    pub chunk_min_size: u64,
+
+    /// The nominal length of each ranged chunk of a large file.
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size: u64,
+
+    /// The most chunks one file may ever be split into.
+    #[serde(default = "default_max_chunks")]
+    pub max_chunks: u32,
+
+    /// The most chunks of a single file that may be in flight at once.
+    #[serde(default = "default_chunk_concurrency")]
+    pub chunk_concurrency: usize,
 }
 
 impl DownloadConfig {
@@ -80,6 +97,16 @@ impl DownloadConfig {
             bytes: self.budget_bytes,
             floor: self.min_concurrency,
             ceiling: self.max_concurrency,
+        }
+    }
+
+    /// The chunk limits as the download path wants them.
+    pub fn chunking(&self) -> Chunking {
+        Chunking {
+            min_size: self.chunk_min_size,
+            chunk_size: self.chunk_size,
+            max_chunks: self.max_chunks,
+            max_slots: self.chunk_concurrency,
         }
     }
 }
@@ -96,12 +123,32 @@ fn default_max_concurrency() -> usize {
     budget::DEFAULT_CEILING
 }
 
+fn default_chunk_min_size() -> u64 {
+    api::DEFAULT_MIN_SIZE
+}
+
+fn default_chunk_size() -> u64 {
+    api::DEFAULT_CHUNK_SIZE
+}
+
+fn default_max_chunks() -> u32 {
+    api::DEFAULT_MAX_CHUNKS
+}
+
+fn default_chunk_concurrency() -> usize {
+    api::DEFAULT_MAX_SLOTS
+}
+
 impl Default for DownloadConfig {
     fn default() -> Self {
         Self {
             budget_bytes: default_budget_bytes(),
             min_concurrency: default_min_concurrency(),
             max_concurrency: default_max_concurrency(),
+            chunk_min_size: default_chunk_min_size(),
+            chunk_size: default_chunk_size(),
+            max_chunks: default_max_chunks(),
+            chunk_concurrency: default_chunk_concurrency(),
         }
     }
 }
@@ -173,6 +220,18 @@ impl Config {
         if let Some(value) = env_parse("DBSYNC_DOWNLOAD_MAX_CONCURRENCY")? {
             self.download.max_concurrency = value;
         }
+        if let Some(value) = env_parse("DBSYNC_DOWNLOAD_CHUNK_MIN_SIZE")? {
+            self.download.chunk_min_size = value;
+        }
+        if let Some(value) = env_parse("DBSYNC_DOWNLOAD_CHUNK_SIZE")? {
+            self.download.chunk_size = value;
+        }
+        if let Some(value) = env_parse("DBSYNC_DOWNLOAD_MAX_CHUNKS")? {
+            self.download.max_chunks = value;
+        }
+        if let Some(value) = env_parse("DBSYNC_DOWNLOAD_CHUNK_CONCURRENCY")? {
+            self.download.chunk_concurrency = value;
+        }
         Ok(())
     }
 
@@ -208,6 +267,29 @@ impl Config {
                 "download.max_concurrency ({}) must be at least download.min_concurrency ({})",
                 self.download.max_concurrency, self.download.min_concurrency,
             )));
+        }
+        // A zero chunk size would divide the plan by nothing, and a threshold
+        // below one chunk would split files that cannot usefully be split.
+        if self.download.chunk_size == 0 {
+            return Err(Error::Config(
+                "download.chunk_size must be at least 1".into(),
+            ));
+        }
+        if self.download.chunk_min_size < self.download.chunk_size {
+            return Err(Error::Config(format!(
+                "download.chunk_min_size ({}) must be at least download.chunk_size ({})",
+                self.download.chunk_min_size, self.download.chunk_size,
+            )));
+        }
+        if self.download.max_chunks == 0 {
+            return Err(Error::Config(
+                "download.max_chunks must be at least 1".into(),
+            ));
+        }
+        if self.download.chunk_concurrency == 0 {
+            return Err(Error::Config(
+                "download.chunk_concurrency must be at least 1".into(),
+            ));
         }
         if !self.remote_root.is_empty() && !self.remote_root.starts_with('/') {
             return Err(Error::Config(
@@ -270,6 +352,54 @@ mod tests {
         "#,
         );
         assert!(matches!(Config::load(&path), Err(Error::Config(_))));
+    }
+
+    /// A threshold below one chunk would split files that cannot usefully be
+    /// split, so the pair is refused rather than silently reconciled.
+    #[test]
+    fn rejects_a_chunk_threshold_below_one_chunk() {
+        let (_dir, path) = write(
+            r#"
+            local_root = "/data/Dropbox"
+            app_key = "abc123"
+            [download]
+            chunk_size = 1048576
+            chunk_min_size = 1024
+        "#,
+        );
+        assert!(matches!(Config::load(&path), Err(Error::Config(_))));
+    }
+
+    /// A zero chunk size would divide the plan by nothing.
+    #[test]
+    fn rejects_a_zero_chunk_size() {
+        let (_dir, path) = write(
+            r#"
+            local_root = "/data/Dropbox"
+            app_key = "abc123"
+            [download]
+            chunk_size = 0
+        "#,
+        );
+        assert!(matches!(Config::load(&path), Err(Error::Config(_))));
+    }
+
+    /// The chunk keys must reach the download path, or configuring them would
+    /// silently do nothing.
+    #[test]
+    fn the_chunk_keys_become_the_download_limits() {
+        let download = DownloadConfig {
+            chunk_min_size: 4_000,
+            chunk_size: 1_000,
+            max_chunks: 9,
+            chunk_concurrency: 3,
+            ..DownloadConfig::default()
+        };
+        let chunking = download.chunking();
+        assert_eq!(chunking.min_size, 4_000);
+        assert_eq!(chunking.chunk_size, 1_000);
+        assert_eq!(chunking.max_chunks, 9);
+        assert_eq!(chunking.max_slots, 3);
     }
 
     #[test]
