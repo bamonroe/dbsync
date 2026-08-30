@@ -245,7 +245,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
                 }
             }
         }
-        self.db.save(&self.state)?;
+        self.db.save(&mut self.state)?;
         tracing::info!(
             attempted = retried.attempted,
             recovered = retried.recovered,
@@ -297,7 +297,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
             page = listing::list_folder_continue(&self.source, &cursor).await?;
         }
         pull.applied += self.drop_vanished(&seen).await?;
-        self.db.save(&self.state)?;
+        self.db.save(&mut self.state)?;
         Ok(pull)
     }
 
@@ -331,7 +331,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
         .apply(&entries)
         .await?;
         self.state.set_cursor(cursor);
-        self.db.save(&self.state)?;
+        self.db.save(&mut self.state)?;
         Ok(applied)
     }
 
@@ -353,7 +353,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
             push += self.push_one(local).await?;
         }
         if push != Push::default() {
-            self.db.save(&self.state)?;
+            self.db.save(&mut self.state)?;
         }
         Ok(push)
     }
@@ -660,9 +660,11 @@ mod tests {
         let mut fixture = Fixture::new(Some("c0"));
         let entries = fixture.stage_files(page::CHECKPOINT_EVERY + 5);
         fixture.remote().queue_continue(page(entries, "c1", false));
-        // A directory where the state file belongs: every save fails, so the
-        // first interim checkpoint takes the page down with it.
+        // Directories where the state file and its journal belong: every save
+        // fails, by both the incremental path and the whole-file fallback, so
+        // the first interim checkpoint takes the page down with it.
         std::fs::create_dir(fixture.dir.path().join("state.json")).unwrap();
+        std::fs::create_dir(fixture.dir.path().join("state.journal")).unwrap();
 
         assert!(fixture.applier.pull().await.is_err());
         assert_eq!(fixture.applier.cursor(), Some("c0"));

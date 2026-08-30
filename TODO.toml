@@ -19,15 +19,3 @@ add_proposed_work = "Add proposed work as a new task rather than losing it."
 remove_dropped_items = "Remove dropped items with a one-line why."
 finish_work = "When a task is fully finished (built, tested, documented), run `scripts/todo.sh done <id>` to move it to FINISHED.toml."
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
-
-[[task]]
-id = "persist-sync-state-incrementally-instead-of-rewriting-the-whole-file"
-title = "Persist sync state incrementally instead of rewriting the whole file"
-description = "StateDb::save serializes and writes every tracked entry on each call, which is what makes mid-page checkpointing expensive. An append-only journal or a keyed store would make a checkpoint cost the size of the change rather than the size of the account, removing the O(n^2) shape at its root rather than tuning around it."
-status = "active"
-level = "scope"
-category = "feature"
-urgency = "normal"
-order = 20
-created = 2026-08-29
-tags = ["state", "performance"]

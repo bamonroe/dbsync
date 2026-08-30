@@ -237,6 +237,14 @@ conflicted copy syncs up like any other file.
 The first run has no cursor and lists the whole folder, which can take a while on a large
 account; later runs resume from the saved cursor in `state.json`.
 
+Alongside `state.json` you will see `state.journal`. It holds the changes made since the
+snapshot was last written, and exists so that saving costs what actually changed rather than
+rewriting every tracked file each time — on a large account the difference is a stalled sync
+and a working one. It is replayed automatically on startup and folded back into the snapshot
+periodically, so there is nothing to maintain. Back the two files up together; a journal
+without its snapshot is meaningless, and a snapshot without its journal is merely a little
+out of date.
+
 ## Development
 
 ```sh

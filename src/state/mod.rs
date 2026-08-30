@@ -19,6 +19,7 @@ mod db;
 mod entry;
 pub mod failures;
 pub mod hash;
+pub mod journal;
 pub mod requests;
 
 pub use db::{StateDb, SyncState, key_for};

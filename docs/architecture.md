@@ -211,8 +211,20 @@ Three rules hold the whole thing together:
   already meant a 4 MB rewrite about once a second, pinning a core and starving the very
   download loop the checkpoint exists to protect; at 43k files it would have been ~19 MB a
   time. The interval is one entry per 64 tracked, clamped to [100, 1000] — the cap bounds what
-  a crash can cost, and re-applying entries is idempotent and cheap. Removing the whole-file
-  rewrite is the root fix and is tracked in `TODO.toml`.
+  a crash can cost, and re-applying entries is idempotent and cheap. The whole-file rewrite
+  itself has since gone, so the scaling interval is now belt-and-braces rather than the thing
+  standing between a large pull and a stalled core — see the next invariant.
+- **The state is saved incrementally, not rewritten.** `state.json` is a *snapshot* and
+  `state.journal` beside it carries the changes made since (`src/state/journal.rs`).
+  `SyncState` queues a record per mutation, `StateDb::save` appends the queued records, and
+  `load` replays the journal on top of the snapshot. That makes a save cost what changed
+  rather than what is stored — the difference between an O(entries) write per checkpoint and
+  an O(changes) one. The snapshot is rewritten only when the journal passes `COMPACT_AFTER`
+  (5,000 records), and the rename lands *before* the journal is cleared: a crash between the
+  two replays records the snapshot already holds, which is harmless because replay is
+  idempotent, whereas the other order would lose them. A torn final line — a crash
+  mid-append — stops the replay rather than failing the load; the cost is the last few
+  changes, which the next pull re-delivers.
 - **A failed entry is recorded, not just logged.** One bad path must not stall the stream, so
   a failure is stepped over and the cursor still advances. That alone would make the file
   *silently absent*: the pull reports success, the log line scrolls away, and nothing
@@ -392,6 +404,7 @@ implementation yet.
 | `src/reconcile/budget.rs` | Byte-budget admission control for parallel downloads | done |
 | `src/reconcile/schedule.rs` | Splitting a page into serial and concurrent steps | done |
 | `src/reconcile/page.rs` | Applying one page, overlapping the downloads it safely can | done |
+| `src/state/journal.rs` | The append-only journal of state changes, and folding it back into the snapshot | done |
 | `src/state/requests.rs` | The retry-request queue the CLI writes and the daemon consumes | done |
 | `src/reconcile/listing.rs` | Retrying wrappers around the two listing calls, so one dropped connection does not discard a full listing | done |
 | `src/reconcile/retry.rs` | Choosing and resolving previously-failed entries for another attempt | done |

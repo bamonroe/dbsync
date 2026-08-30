@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::entry::SyncEntry;
 use super::failures::{self, Direction, Failure};
+use super::journal::{COMPACT_AFTER, Journal, Record};
 use crate::error::{Error, Result};
 
 /// Bumped when the on-disk shape changes incompatibly. A state file from a
@@ -58,6 +59,13 @@ pub struct SyncState {
     /// for almost every account.
     #[serde(default)]
     aliases: BTreeMap<String, String>,
+
+    /// What has changed since the last save, so a save can write the deltas
+    /// instead of the whole file. Not serialised: it describes the difference
+    /// between this state and what is on disk, which is meaningless once it
+    /// *is* what is on disk.
+    #[serde(skip)]
+    pending: Vec<Record>,
 }
 
 fn default_version() -> u32 {
@@ -78,6 +86,7 @@ impl SyncState {
             entries: BTreeMap::new(),
             failures: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -89,6 +98,7 @@ impl SyncState {
     /// Advance the cursor after applying a batch of changes.
     pub fn set_cursor(&mut self, cursor: impl Into<String>) {
         self.cursor = Some(cursor.into());
+        self.pending.push(Record::Cursor(self.cursor.clone()));
     }
 
     /// Forget the cursor. Called when Dropbox resets it, which forces a
@@ -96,6 +106,7 @@ impl SyncState {
     /// re-downloads.
     pub fn clear_cursor(&mut self) {
         self.cursor = None;
+        self.pending.push(Record::Cursor(None));
     }
 
     /// The entry for a path, matched case-insensitively.
@@ -105,12 +116,18 @@ impl SyncState {
 
     /// Record or replace the entry for a path.
     pub fn insert(&mut self, entry: SyncEntry) {
+        self.pending.push(Record::Entry(Box::new(entry.clone())));
         self.entries.insert(key_for(&entry.display_path), entry);
     }
 
     /// Forget a path, returning what was there.
     pub fn remove(&mut self, path: &str) -> Option<SyncEntry> {
-        self.entries.remove(&key_for(path))
+        let key = key_for(path);
+        let removed = self.entries.remove(&key);
+        if removed.is_some() {
+            self.pending.push(Record::EntryGone(key));
+        }
+        removed
     }
 
     /// Every known entry, in stable key order.
@@ -132,15 +149,23 @@ impl SyncState {
     pub fn record_failure(&mut self, path: &str, error: &Error, direction: Direction) {
         let kind = failures::classify(error);
         let text = error.to_string();
-        self.failures
-            .entry(key_for(path))
+        let key = key_for(path);
+        let failure = self
+            .failures
+            .entry(key.clone())
             .and_modify(|failure| failure.record_again(text.clone(), kind, direction))
             .or_insert_with(|| Failure::new(path, text, kind, direction));
+        self.pending
+            .push(Record::Failure(key, Box::new(failure.clone())));
     }
 
     /// Remember that the file at local path `relative` is really `display_path`
     /// remotely, because the name had to be shortened to fit on disk.
     pub fn record_alias(&mut self, relative: &str, display_path: &str) {
+        self.pending.push(Record::Alias(
+            relative.to_lowercase(),
+            display_path.to_string(),
+        ));
         self.aliases
             .insert(relative.to_lowercase(), display_path.to_string());
     }
@@ -160,14 +185,22 @@ impl SyncState {
     /// Forget any failure for `path`. Called on every success, so a file that
     /// later arrives stops being reported as missing.
     pub fn clear_failure(&mut self, path: &str) -> Option<Failure> {
-        self.failures.remove(&key_for(path))
+        let key = key_for(path);
+        let removed = self.failures.remove(&key);
+        if removed.is_some() {
+            self.pending.push(Record::FailureGone(key));
+        }
+        removed
     }
 
     /// Record a prepared failure verbatim. For tests and for migrating a
     /// record between keys; ordinary recording goes through
     /// [`Self::record_failure`], which folds attempts and timestamps.
     pub fn insert_failure(&mut self, path: &str, failure: Failure) {
-        self.failures.insert(key_for(path), failure);
+        let key = key_for(path);
+        self.pending
+            .push(Record::Failure(key.clone(), Box::new(failure.clone())));
+        self.failures.insert(key, failure);
     }
 
     /// Every recorded failure, in stable key order.
@@ -196,6 +229,31 @@ impl SyncState {
             .values()
             .filter(move |f| f.kind.is_retryable() && f.direction == direction)
     }
+
+    /// Apply one journal record, as replay does on load.
+    ///
+    /// Goes through the fields directly rather than the mutating methods, which
+    /// would queue the record all over again as pending.
+    fn replay(&mut self, record: Record) {
+        match record {
+            Record::Entry(entry) => {
+                self.entries.insert(key_for(&entry.display_path), *entry);
+            }
+            Record::EntryGone(key) => {
+                self.entries.remove(&key);
+            }
+            Record::Failure(key, failure) => {
+                self.failures.insert(key, *failure);
+            }
+            Record::FailureGone(key) => {
+                self.failures.remove(&key);
+            }
+            Record::Alias(relative, display_path) => {
+                self.aliases.insert(relative, display_path);
+            }
+            Record::Cursor(cursor) => self.cursor = cursor,
+        }
+    }
 }
 
 /// Loads and atomically saves a [`SyncState`] at a fixed path.
@@ -220,8 +278,28 @@ impl StateDb {
         &self.path
     }
 
-    /// Load the state, or a fresh empty one if this is the first run.
+    /// The journal carrying whatever the snapshot does not yet include.
+    pub fn journal(&self) -> Journal {
+        Journal::beside(&self.path)
+    }
+
+    /// Load the snapshot and replay the journal on top of it.
     pub fn load(&self) -> Result<SyncState> {
+        let mut state = self.load_snapshot()?;
+        let records = self.journal().replay()?;
+        if !records.is_empty() {
+            tracing::debug!(records = records.len(), "replaying the state journal");
+        }
+        for record in records {
+            state.replay(record);
+        }
+        // Everything just replayed is already on disk, in the journal.
+        state.pending.clear();
+        Ok(state)
+    }
+
+    /// Load the snapshot alone, ignoring the journal.
+    fn load_snapshot(&self) -> Result<SyncState> {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(SyncState::new()),
@@ -245,12 +323,51 @@ impl StateDb {
         Ok(state)
     }
 
+    /// Persist whatever has changed since the last save.
+    ///
+    /// The cheap path appends the pending records to the journal, which costs
+    /// what actually changed rather than the size of the whole account — the
+    /// difference between an O(n) write per checkpoint and an O(changes) one.
+    /// The snapshot is rewritten only once the journal has grown past
+    /// [`COMPACT_AFTER`], or when there is no snapshot yet.
+    pub fn save(&self, state: &mut SyncState) -> Result<()> {
+        let pending = std::mem::take(&mut state.pending);
+        if pending.is_empty() && self.path.exists() {
+            return Ok(());
+        }
+        let journal = self.journal();
+        let folded = journal.record_count().unwrap_or(0) + pending.len();
+        if !self.path.exists() || folded >= COMPACT_AFTER {
+            return self.compact(state);
+        }
+        match journal.append(&pending) {
+            Ok(()) => Ok(()),
+            // Losing the journal is survivable; losing the change is not. Fall
+            // back to the whole-file write rather than dropping it.
+            Err(error) => {
+                tracing::warn!(%error, "could not append to the state journal; rewriting it whole");
+                self.compact(state)
+            }
+        }
+    }
+
+    /// Fold the journal into a fresh snapshot and drop it.
+    ///
+    /// The order is load-bearing: the snapshot is renamed into place *before*
+    /// the journal is cleared, so a crash between the two replays records the
+    /// snapshot already contains — which is harmless, because replaying a
+    /// record twice lands on the same state — rather than losing them.
+    fn compact(&self, state: &SyncState) -> Result<()> {
+        self.write_snapshot(state)?;
+        self.journal().clear()
+    }
+
     /// Write the state so that a crash leaves either the old file or the new
     /// one, never a partial one.
     ///
     /// The file is synced before the rename so its bytes are durable, and the
     /// directory is synced after so the rename itself survives power loss.
-    pub fn save(&self, state: &SyncState) -> Result<()> {
+    fn write_snapshot(&self, state: &SyncState) -> Result<()> {
         let parent = self
             .path
             .parent()
@@ -307,7 +424,7 @@ mod tests {
         let mut state = SyncState::new();
         state.set_cursor("cursor-abc");
         state.insert(entry("/Photos/Cat.JPG"));
-        db.save(&state).unwrap();
+        db.save(&mut state).unwrap();
 
         let loaded = db.load().unwrap();
         assert_eq!(loaded.cursor(), Some("cursor-abc"));
@@ -376,11 +493,11 @@ mod tests {
         let (_dir, db) = db();
         let mut state = SyncState::new();
         state.insert(entry("/a.txt"));
-        db.save(&state).unwrap();
+        db.save(&mut state).unwrap();
 
         state.remove("/a.txt");
         state.insert(entry("/b.txt"));
-        db.save(&state).unwrap();
+        db.save(&mut state).unwrap();
 
         let loaded = db.load().unwrap();
         assert_eq!(loaded.len(), 1);
@@ -390,7 +507,7 @@ mod tests {
     #[test]
     fn no_temp_file_survives_a_save() {
         let (_dir, db) = db();
-        db.save(&SyncState::new()).unwrap();
+        db.save(&mut SyncState::new()).unwrap();
         assert!(!db.path().with_extension("tmp").exists());
     }
 
@@ -411,7 +528,7 @@ mod tests {
         let (_dir, db) = db();
         let mut state = SyncState::new();
         state.insert(entry("/a.txt"));
-        db.save(&state).unwrap();
+        db.save(&mut state).unwrap();
 
         std::fs::write(db.path().with_extension("tmp"), "{ half-written").unwrap();
 
@@ -436,5 +553,99 @@ mod tests {
         }
         let paths: Vec<_> = state.entries().map(|e| e.display_path.as_str()).collect();
         assert_eq!(paths, ["/a.txt", "/b.txt", "/c.txt"]);
+    }
+
+    /// The whole point: a save must cost what changed, not what is stored.
+    /// Rewriting every entry per checkpoint is what made a large pull quadratic.
+    #[test]
+    fn a_save_after_the_first_appends_instead_of_rewriting() {
+        let (_dir, db) = db();
+        let mut state = SyncState::new();
+        state.insert(entry("/a.txt"));
+        db.save(&mut state).unwrap();
+        let snapshot = std::fs::metadata(db.path()).unwrap().modified().unwrap();
+
+        state.insert(entry("/b.txt"));
+        db.save(&mut state).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(db.path()).unwrap().modified().unwrap(),
+            snapshot,
+            "the snapshot was not touched"
+        );
+        assert_eq!(db.journal().record_count().unwrap(), 1);
+    }
+
+    /// A journal is only useful if loading applies it.
+    #[test]
+    fn a_load_replays_the_journal_on_top_of_the_snapshot() {
+        let (_dir, db) = db();
+        let mut state = SyncState::new();
+        state.insert(entry("/a.txt"));
+        db.save(&mut state).unwrap();
+        state.insert(entry("/b.txt"));
+        state.set_cursor("c2");
+        state.remove("/a.txt");
+        db.save(&mut state).unwrap();
+
+        let loaded = db.load().unwrap();
+
+        assert!(loaded.get("/b.txt").is_some(), "the appended entry");
+        assert!(loaded.get("/a.txt").is_none(), "the appended removal");
+        assert_eq!(loaded.cursor(), Some("c2"));
+    }
+
+    /// Otherwise the journal would grow without bound and startup with it.
+    #[test]
+    fn the_journal_is_folded_back_into_the_snapshot_once_it_is_long() {
+        let (_dir, db) = db();
+        let mut state = SyncState::new();
+        state.insert(entry("/a.txt"));
+        db.save(&mut state).unwrap();
+
+        for i in 0..COMPACT_AFTER {
+            state.insert(entry(&format!("/f{i}.txt")));
+        }
+        db.save(&mut state).unwrap();
+
+        assert_eq!(db.journal().record_count().unwrap(), 0, "folded in");
+        assert_eq!(db.load().unwrap().len(), COMPACT_AFTER + 1);
+    }
+
+    /// Replaying a record the snapshot already contains must be harmless: a
+    /// crash between writing the snapshot and clearing the journal leaves
+    /// exactly that, and losing the records would be the worse trade.
+    #[test]
+    fn replaying_a_record_the_snapshot_already_holds_changes_nothing() {
+        let (_dir, db) = db();
+        let mut state = SyncState::new();
+        state.insert(entry("/a.txt"));
+        db.save(&mut state).unwrap();
+        // The snapshot holds /a.txt; put the same record in the journal too.
+        db.journal()
+            .append(&[Record::Entry(Box::new(entry("/a.txt")))])
+            .unwrap();
+
+        let loaded = db.load().unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.get("/a.txt").is_some());
+    }
+
+    /// A load hands back state that matches the disk, so an immediate save must
+    /// not append the records it just replayed all over again.
+    #[test]
+    fn a_load_leaves_nothing_pending() {
+        let (_dir, db) = db();
+        let mut state = SyncState::new();
+        state.insert(entry("/a.txt"));
+        db.save(&mut state).unwrap();
+        state.insert(entry("/b.txt"));
+        db.save(&mut state).unwrap();
+
+        let mut loaded = db.load().unwrap();
+        db.save(&mut loaded).unwrap();
+
+        assert_eq!(db.journal().record_count().unwrap(), 1, "unchanged");
     }
 }
