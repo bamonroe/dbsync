@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "scale-the-mid-page-checkpoint-interval-with-the-tracked-file-count"
+title = "Scale the mid-page checkpoint interval with the tracked-file count"
+description = "Page::tally saves the whole state file every 100 applied entries. The file is rewritten in full, so a large pull is O(n^2) in bytes written: at 43k tracked files that is a ~19 MB write every 100 entries, which pegs a core and starves the download loop. Scale the interval with the tracked count so write amplification stays bounded, while capping how many entries a crash can cost."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-29
+completed = 2026-08-29
+tags = ["reconcile", "performance"]
+
+[[task]]
 id = "document-ranged-chunked-downloads-in-the-architecture-doc"
 title = "Document ranged chunked downloads in the architecture doc"
 description = "docs/architecture.md owns how the data path works and records the load-bearing decisions, so the chunking design belongs there and nowhere else: why chunks address rev:<rev> rather than the display path, why progress moved from a file length to a sidecar bitmap, why completion is 'every chunk present', and how per-file chunk concurrency composes with the across-file byte budget instead of multiplying it. Link it from the download section rather than restating the config keys README.md owns."
