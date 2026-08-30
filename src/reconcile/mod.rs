@@ -27,7 +27,7 @@ mod conflict;
 mod listing;
 mod local;
 mod page;
-mod paths;
+pub(crate) mod paths;
 pub mod retry;
 pub mod schedule;
 mod sink;

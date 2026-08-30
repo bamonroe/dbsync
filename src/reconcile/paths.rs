@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 
 /// The most bytes Linux allows in one path component. Dropbox allows more, so a
 /// legal remote name can have no legal local name.
-const MAX_COMPONENT_BYTES: usize = 255;
+pub(crate) const MAX_COMPONENT_BYTES: usize = 255;
 
 /// How many hex characters of the name's hash are kept when shortening.
 ///
@@ -163,13 +163,23 @@ fn outside_root(path: &str) -> Error {
 /// The extension is preserved, because it is what decides whether anything can
 /// open the file.
 fn shorten(component: &str) -> String {
-    if component.len() <= MAX_COMPONENT_BYTES {
+    shorten_to(component, MAX_COMPONENT_BYTES)
+}
+
+/// [`shorten`], but against a caller-supplied limit.
+///
+/// A download writes to a scratch sibling whose name carries a suffix, so it has
+/// less than the full component budget to spend on the name itself; it asks for
+/// the smaller limit rather than reserving the space permanently on the real
+/// name, which only ever has to fit on its own.
+pub(crate) fn shorten_to(component: &str, limit: usize) -> String {
+    if component.len() <= limit {
         return component.to_string();
     }
     let fingerprint = fingerprint(component);
     let extension = extension_of(component);
     // "~", the fingerprint, and the extension all have to fit inside the limit.
-    let room = MAX_COMPONENT_BYTES - 1 - FINGERPRINT_HEX - extension.len();
+    let room = limit.saturating_sub(1 + FINGERPRINT_HEX + extension.len());
     let mut prefix = String::new();
     // By characters, not bytes: truncating mid-character would not be valid
     // UTF-8, and these names are full of them.

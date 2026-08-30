@@ -21,6 +21,7 @@ use super::client::ApiClient;
 use super::partial::Partial;
 use super::range::ByteRange;
 use crate::error::{Error, Result};
+use crate::reconcile::paths::{MAX_COMPONENT_BYTES, shorten_to};
 
 /// Suffix for the partial file a download writes before its rename.
 const PARTIAL_SUFFIX: &str = ".dbsync-partial";
@@ -277,9 +278,25 @@ async fn stream_to(response: &mut reqwest::Response, file: &mut tokio::fs::File)
 /// The revision is part of the name so a partial is only ever resumed into the
 /// revision it was fetched from. A file edited remotely mid-download simply
 /// gets a different partial, and the stale one is swept later.
+///
+/// The suffix is added on top of a name that may already sit at the filesystem's
+/// component limit, so the base is shortened when it has to be. Only the scratch
+/// name pays that cost: `dest` is renamed into place at the end and has the whole
+/// budget to itself. The shortened base still identifies the partial uniquely,
+/// which is all a resume needs, and the sweep recognises it by its suffix.
 fn partial_path(dest: &Path, rev: &str) -> std::path::PathBuf {
-    let mut name = dest.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}{PARTIAL_SUFFIX}", sanitise_rev(rev)));
+    let suffix = format!(".{}{PARTIAL_SUFFIX}", sanitise_rev(rev));
+    // The chunk map is named off the partial, so it is the longer of the two and
+    // the one that has to fit.
+    let room = MAX_COMPONENT_BYTES.saturating_sub(suffix.len() + MAP_SUFFIX.len());
+    let base = dest.file_name().unwrap_or_default();
+    let mut name = match base.to_str() {
+        Some(base) => std::ffi::OsString::from(shorten_to(base, room)),
+        // Not valid UTF-8, so it cannot be fingerprinted; leave it alone rather
+        // than risk splitting a byte sequence.
+        None => base.to_os_string(),
+    };
+    name.push(suffix);
     dest.with_file_name(name)
 }
 
@@ -345,6 +362,45 @@ mod tests {
         let partial = partial_path(Path::new("/tmp/a.txt"), &"a".repeat(500));
         let name = partial.file_name().unwrap().to_str().unwrap();
         assert!(name.len() < 100, "filename was {} bytes", name.len());
+    }
+
+    /// The real name is allowed to sit at the limit, so the partial's suffix —
+    /// and the chunk map's on top of it — has to come out of the base.
+    #[test]
+    fn a_partial_of_a_maximal_name_still_fits() {
+        let dest = Path::new("/tmp").join("a".repeat(MAX_COMPONENT_BYTES));
+        let partial = partial_path(&dest, "0159abc");
+        let name = partial.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.len() <= MAX_COMPONENT_BYTES,
+            "partial was {}",
+            name.len()
+        );
+        assert!(
+            name.len() + MAP_SUFFIX.len() <= MAX_COMPONENT_BYTES,
+            "chunk map would not fit"
+        );
+        assert!(is_partial(&partial));
+    }
+
+    /// Shortening must not merge two long names onto one scratch file, or a
+    /// resume would append one file's bytes onto another's prefix.
+    #[test]
+    fn two_long_names_sharing_a_prefix_get_different_partials() {
+        let shared = "b".repeat(MAX_COMPONENT_BYTES);
+        let one = Path::new("/tmp").join(format!("{shared}one"));
+        let two = Path::new("/tmp").join(format!("{shared}two"));
+        assert_ne!(partial_path(&one, "r1"), partial_path(&two, "r1"));
+    }
+
+    /// A short name is left exactly as it was.
+    #[test]
+    fn an_ordinary_name_is_not_shortened() {
+        let partial = partial_path(Path::new("/tmp/a.txt"), "r1");
+        assert_eq!(
+            partial.file_name().unwrap().to_str().unwrap(),
+            "a.txt.r1.dbsync-partial"
+        );
     }
 
     #[test]

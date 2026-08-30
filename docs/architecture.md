@@ -268,6 +268,14 @@ Three rules hold the whole thing together:
   shortened name no longer says what the remote one was, the state carries an `aliases` index
   from local path to remote display path, and the upload direction consults it first —
   otherwise an edit would be uploaded as a second, wrongly-named remote file.
+- **The scratch name pays for its own suffix, not the real one.** A download writes to a
+  `.<rev>.dbsync-partial` sibling, and the chunk map is named off *that*, so the scratch name
+  is longer than the file's — a name sitting at exactly 255 bytes was legal at rest and still
+  failed mid-download. `partial_path` shortens its own base against the reduced budget using
+  the same fingerprinting helper (`paths::shorten_to`). Shortening `dest` instead would be
+  the wrong trade: the rename lands at the end, so the real name only ever has to fit on its
+  own, and shrinking it permanently to make room for a temporary suffix would mangle names
+  that are perfectly legal.
 - **Paths from Dropbox are untrusted.** `PathMapper` refuses any path that would escape the
   sync root rather than clamping it, and one unapplicable entry is logged and stepped over
   rather than stalling the stream behind it.
