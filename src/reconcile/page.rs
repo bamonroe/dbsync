@@ -29,16 +29,36 @@ use super::paths::PathMapper;
 use super::schedule::{self, Step};
 use super::source::RemoteSource;
 
-/// How many applied entries between interim state saves inside one page.
+/// The smallest interval between interim state saves inside one page.
 ///
 /// A compromise: the state file is rewritten whole, so saving per entry would
 /// make a large pull O(n²) in bytes written, while saving too rarely is what
 /// this exists to avoid. At 100 an interrupt costs at most 99 re-downloads.
 pub(crate) const CHECKPOINT_EVERY: usize = 100;
 
+/// The largest interval, so the interval below can never grow without bound:
+/// a crash may cost at most this many re-applied entries however big the
+/// account is. Re-applying is cheap and idempotent; losing a whole page is not.
+pub(crate) const CHECKPOINT_AT_MOST: usize = 1000;
+
+/// How many tracked entries buy one entry of extra interval. A save costs
+/// bytes proportional to the tracked count, so holding the ratio of
+/// bytes-written to entries-applied roughly constant means the interval has to
+/// grow with the account rather than staying at a flat 100.
+const ENTRIES_PER_TRACKED: usize = 64;
+
+/// How many applied entries between interim saves, given what is tracked.
+///
+/// A flat interval is what made a large pull quadratic: at 43k tracked files a
+/// full-file save every 100 entries is a ~19 MB write 430 times a page, which
+/// pegs a core and starves the download loop it is meant to protect.
+pub(crate) fn checkpoint_interval(tracked: usize) -> usize {
+    (tracked / ENTRIES_PER_TRACKED).clamp(CHECKPOINT_EVERY, CHECKPOINT_AT_MOST)
+}
+
 /// Whether `applied` entries into a page is a point to save state at.
-pub(crate) fn is_checkpoint(applied: usize) -> bool {
-    applied > 0 && applied.is_multiple_of(CHECKPOINT_EVERY)
+pub(crate) fn is_checkpoint(applied: usize, tracked: usize) -> bool {
+    applied > 0 && applied.is_multiple_of(checkpoint_interval(tracked))
 }
 
 /// Everything applying a page needs, gathered so the borrow of the reconciler
@@ -147,9 +167,13 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
                 return Ok(());
             }
         }
-        if is_checkpoint(*applied) {
+        if is_checkpoint(*applied, self.state.len()) {
             self.db.save(self.state)?;
-            tracing::debug!(applied = *applied, "checkpointed mid-page");
+            tracing::debug!(
+                applied = *applied,
+                tracked = self.state.len(),
+                "checkpointed mid-page"
+            );
         }
         Ok(())
     }
@@ -170,10 +194,41 @@ mod tests {
     /// the page barrier, in `Reconciler::apply_page`.
     #[test]
     fn state_is_checkpointed_on_the_interval_only() {
-        assert!(!is_checkpoint(0), "no save before anything is applied");
-        assert!(!is_checkpoint(CHECKPOINT_EVERY - 1));
-        assert!(is_checkpoint(CHECKPOINT_EVERY));
-        assert!(!is_checkpoint(CHECKPOINT_EVERY + 1));
-        assert!(is_checkpoint(CHECKPOINT_EVERY * 3));
+        assert!(!is_checkpoint(0, 0), "no save before anything is applied");
+        assert!(!is_checkpoint(CHECKPOINT_EVERY - 1, 0));
+        assert!(is_checkpoint(CHECKPOINT_EVERY, 0));
+        assert!(!is_checkpoint(CHECKPOINT_EVERY + 1, 0));
+        assert!(is_checkpoint(CHECKPOINT_EVERY * 3, 0));
+    }
+
+    /// A small account keeps the floor: the interval exists to bound re-work,
+    /// and re-work is what matters when a save is cheap.
+    #[test]
+    fn a_small_account_checkpoints_on_the_floor() {
+        assert_eq!(checkpoint_interval(0), CHECKPOINT_EVERY);
+        assert_eq!(checkpoint_interval(100), CHECKPOINT_EVERY);
+        assert_eq!(
+            checkpoint_interval(CHECKPOINT_EVERY * ENTRIES_PER_TRACKED),
+            CHECKPOINT_EVERY,
+            "the floor holds right up to where the ratio takes over"
+        );
+    }
+
+    /// The interval grows with the account, which is the whole point: a save
+    /// costs bytes proportional to what is tracked.
+    #[test]
+    fn a_large_account_checkpoints_less_often() {
+        assert_eq!(checkpoint_interval(43_000), 43_000 / ENTRIES_PER_TRACKED);
+        assert!(
+            checkpoint_interval(43_000) > checkpoint_interval(8_500),
+            "a bigger account must not save as often as a smaller one"
+        );
+    }
+
+    /// However large the account, a crash may not cost an unbounded page.
+    #[test]
+    fn the_interval_is_capped_however_big_the_account() {
+        assert_eq!(checkpoint_interval(usize::MAX), CHECKPOINT_AT_MOST);
+        assert_eq!(checkpoint_interval(10_000_000), CHECKPOINT_AT_MOST);
     }
 }

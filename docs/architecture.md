@@ -204,8 +204,15 @@ Three rules hold the whole thing together:
   harmless because every operation is idempotent. Under concurrency this is no longer free —
   the page's slowest download gates the advance — but it stays the right trade, and a Dropbox
   cursor is opaque, so it cannot be positioned mid-page anyway. Entries *are* saved within a
-  page, every hundred completions; those interim saves only ever add files that really are on
-  disk and never touch the cursor.
+  page; those interim saves only ever add files that really are on disk and never touch the
+  cursor. The **interval between them scales with the tracked-file count** rather than being a
+  flat hundred: the state file is rewritten whole, so a fixed interval makes a large pull
+  quadratic in bytes written. Measured on a live account, a flat hundred at 8.5k tracked files
+  already meant a 4 MB rewrite about once a second, pinning a core and starving the very
+  download loop the checkpoint exists to protect; at 43k files it would have been ~19 MB a
+  time. The interval is one entry per 64 tracked, clamped to [100, 1000] — the cap bounds what
+  a crash can cost, and re-applying entries is idempotent and cheap. Removing the whole-file
+  rewrite is the root fix and is tracked in `TODO.toml`.
 - **A cursor reset is routine, not an error.** `pull` catches it, drops the cursor, and
   re-lists. The re-list *reconciles*: entries whose `rev` still matches are skipped, and
   anything in the state the listing does not mention was deleted remotely while we were
