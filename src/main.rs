@@ -40,6 +40,23 @@ enum Command {
         #[arg(long)]
         permanent: bool,
     },
+    /// Ask the daemon to try one or more paths again.
+    ///
+    /// The request is queued rather than performed here: the daemon owns the
+    /// state file, so a second process transferring behind its back would have
+    /// its work overwritten. It is picked up on the daemon's next pass, and
+    /// waits on disk if the daemon is not running.
+    Retry {
+        /// Remote paths, as `dbsync failures` prints them.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Re-send the local file instead of re-fetching the remote one.
+        ///
+        /// Say so explicitly: re-fetching a path whose upload failed would pull
+        /// the remote copy over the local edit that never got sent.
+        #[arg(long)]
+        upload: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -91,6 +108,29 @@ async fn main() -> anyhow::Result<()> {
             let db = dbsync::state::StateDb::default_location()?;
             let state = db.load()?;
             print_failures(&state, retryable, permanent);
+            Ok(())
+        }
+        Command::Retry { paths, upload } => {
+            let db = dbsync::state::StateDb::default_location()?;
+            let queue = dbsync::state::RetryQueue::beside(db.path());
+            let direction = if upload {
+                dbsync::state::Direction::Upload
+            } else {
+                dbsync::state::Direction::Download
+            };
+            for path in &paths {
+                queue.push(&dbsync::state::RetryRequest {
+                    display_path: path.clone(),
+                    direction,
+                })?;
+                println!("queued {} retry: {path}", direction.label());
+            }
+            println!(
+                "\n{} request{} queued at {}; the daemon picks them up on its next pass",
+                paths.len(),
+                if paths.len() == 1 { "" } else { "s" },
+                queue.path().display()
+            );
             Ok(())
         }
         Command::Run => {

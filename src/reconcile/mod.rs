@@ -49,7 +49,7 @@ use std::collections::HashSet;
 
 use crate::api::ListFolderPage;
 use crate::error::{Error, Result};
-use crate::state::{Direction, StateDb, SyncState, key_for};
+use crate::state::{Direction, RetryQueue, StateDb, SyncState, key_for};
 
 /// What one pull did. Reported so the daemon can log it and the tests can pin
 /// the re-list path.
@@ -93,6 +93,8 @@ pub struct Reconciler<S> {
     state: SyncState,
     /// The gate every concurrent download passes through.
     admission: Admission,
+    /// Retry requests left by `dbsync retry`, taken at the start of each pass.
+    requests: RetryQueue,
 }
 
 impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
@@ -109,6 +111,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
         budget: Budget,
     ) -> Self {
         Self {
+            requests: RetryQueue::beside(db.path()),
             source,
             paths,
             db,
@@ -131,6 +134,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
     /// With no cursor — a first run — this is a full listing. A cursor Dropbox
     /// has invalidated is handled the same way, transparently.
     pub async fn pull(&mut self) -> Result<Pull> {
+        self.absorb_retry_requests();
         // Taken *before* the listing: an entry that fails during this pull has
         // just been attempted, and trying it again seconds later would only
         // repeat whatever went wrong. It waits for the next pull instead.
@@ -142,6 +146,40 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
         // moved past it.
         pull.retried = self.retry_failures(candidates).await?;
         Ok(pull)
+    }
+
+    /// Turn anything `dbsync retry` queued into a retryable failure record.
+    ///
+    /// Recording rather than transferring is what makes the CLI safe next to a
+    /// running daemon: the request becomes an ordinary entry on the failure
+    /// list, and the existing retry passes — one per direction — pick it up on
+    /// their own terms, under the same budget as everything else. It also
+    /// revives a *permanent* entry, which is the point of asking by hand: the
+    /// operator has presumably just renamed the file in Dropbox.
+    ///
+    /// A queue that cannot be read is logged and skipped. Refusing to sync
+    /// because a scratch file is unreadable would be a far worse failure than
+    /// the retry not happening.
+    fn absorb_retry_requests(&mut self) {
+        let requests = match self.requests.take() {
+            Ok(requests) => requests,
+            Err(error) => {
+                tracing::warn!(%error, "could not read the retry queue");
+                return;
+            }
+        };
+        for request in requests {
+            tracing::info!(
+                path = request.display_path,
+                direction = request.direction.label(),
+                "retry requested"
+            );
+            self.state.record_failure(
+                &request.display_path,
+                &Error::Config("retry requested".into()),
+                request.direction,
+            );
+        }
     }
 
     /// The listing half of a pull, before failed entries are re-attempted.
@@ -309,6 +347,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
     /// pull side takes its candidates before listing: a path that fails during
     /// this batch waits for the next one instead of being retried immediately.
     pub async fn push(&mut self, batch: &[std::path::PathBuf]) -> Result<Push> {
+        self.absorb_retry_requests();
         let mut push = self.retry_uploads().await?;
         for local in batch {
             push += self.push_one(local).await?;
@@ -868,6 +907,59 @@ mod tests {
 
         let db = StateDb::at(fixture.dir.path().join("state.json"));
         assert!(db.load().unwrap().get("/new.txt").is_some());
+    }
+
+    /// The point of asking by hand: a permanent entry is revived, because the
+    /// operator has presumably just fixed whatever made it permanent.
+    #[tokio::test]
+    async fn a_queued_request_revives_a_permanent_failure_and_refetches_it() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/long.txt", b"content");
+        fixture.applier.state.insert_failure(
+            "/long.txt",
+            crate::state::Failure::new(
+                "/long.txt",
+                "File name too long (os error 36)",
+                crate::state::FailureKind::Permanent,
+                Direction::Download,
+            ),
+        );
+        fixture.remote().set_metadata(file("/long.txt", "r1"));
+        fixture
+            .applier
+            .requests
+            .push(&crate::state::RetryRequest {
+                display_path: "/long.txt".into(),
+                direction: Direction::Download,
+            })
+            .unwrap();
+
+        fixture.remote().queue_continue(page(vec![], "c1", false));
+        let pull = fixture.applier.pull().await.unwrap();
+
+        assert_eq!(pull.retried.attempted, 1);
+        assert_eq!(pull.retried.recovered, 1);
+        assert_eq!(fixture.applier.state().failure_count(), 0);
+        assert!(fixture.local("long.txt").exists());
+    }
+
+    /// The queue is the acknowledgement; leaving it would retry every pass.
+    #[tokio::test]
+    async fn absorbing_the_queue_clears_it() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture
+            .applier
+            .requests
+            .push(&crate::state::RetryRequest {
+                display_path: "/a.txt".into(),
+                direction: Direction::Upload,
+            })
+            .unwrap();
+
+        fixture.applier.absorb_retry_requests();
+
+        assert!(!fixture.applier.requests.path().exists());
+        assert!(fixture.applier.state().is_failed("/a.txt"));
     }
 
     /// A local edit that never reached Dropbox exists only on this machine.

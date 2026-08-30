@@ -236,6 +236,13 @@ Three rules hold the whole thing together:
   copy over the local edit that never got sent, which is worse than the failure itself. The
   field defaults to `download` on load, so a state file written before it existed reads as
   what it could only have held.
+- **The CLI asks the daemon; it does not write the state behind it.** `dbsync retry <path>`
+  appends to a `retry-requests` file beside `state.json` (`src/state/requests.rs`) and the
+  daemon takes and deletes it at the start of each pass. Only the CLI writes that file and
+  only the daemon removes it, so there is nothing to race over — whereas editing `state.json`
+  from a second process would simply be overwritten by the daemon's next whole-file save. A
+  request is absorbed into the ordinary failure record, so it is retried under the same budget
+  as everything else, and it revives a permanent entry deliberately.
 - **A cursor reset is routine, not an error.** `pull` catches it, drops the cursor, and
   re-lists. The re-list *reconciles*: entries whose `rev` still matches are skipped, and
   anything in the state the listing does not mention was deleted remotely while we were
@@ -376,6 +383,7 @@ implementation yet.
 | `src/reconcile/budget.rs` | Byte-budget admission control for parallel downloads | done |
 | `src/reconcile/schedule.rs` | Splitting a page into serial and concurrent steps | done |
 | `src/reconcile/page.rs` | Applying one page, overlapping the downloads it safely can | done |
+| `src/state/requests.rs` | The retry-request queue the CLI writes and the daemon consumes | done |
 | `src/reconcile/listing.rs` | Retrying wrappers around the two listing calls, so one dropped connection does not discard a full listing | done |
 | `src/reconcile/retry.rs` | Choosing and resolving previously-failed entries for another attempt | done |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |

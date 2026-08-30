@@ -19,10 +19,12 @@ mod db;
 mod entry;
 pub mod failures;
 pub mod hash;
+pub mod requests;
 
 pub use db::{StateDb, SyncState, key_for};
 pub use entry::{SyncEntry, from_nanos, to_nanos};
 pub use failures::{Direction, Failure, FailureKind};
+pub use requests::{RetryQueue, RetryRequest};
 
 use std::path::Path;
 

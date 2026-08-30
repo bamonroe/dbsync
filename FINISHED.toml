@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "give-dbsync-failures-a-way-to-retry-one-path-on-demand"
+title = "Give dbsync failures a way to retry one path on demand"
+description = "The retry pass runs on a pull. An operator who has just fixed the cause (renamed a long filename, freed disk) has no way to say 'try this one now' short of waiting for the next pull or forcing a re-list by clearing the cursor."
+status = "finished"
+level = "task"
+category = "feature"
+created = 2026-08-30
+completed = 2026-08-30
+tags = ["cli"]
+
+[[task]]
 id = "record-failures-for-the-local-to-remote-direction-too"
 title = "Record failures for the local-to-remote direction too"
 description = "Reconciler::push logs and steps over a failing path exactly as the pull path used to, so a file that fails to upload is silently un-synced with no record. The failure store is direction-agnostic; the push path just does not write to it yet."

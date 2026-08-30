@@ -185,12 +185,24 @@ local edit existing only on this machine.
 dbsync failures                # everything currently out of sync
 dbsync failures --permanent    # only the ones that need you to act
 dbsync failures --retryable    # only the ones a retry may still fix
+
+dbsync retry "/Books/long name.pdf"          # ask for one path again
+dbsync retry --upload "/notes/today.md"      # re-send the local file instead
 ```
 
 Each line shows the direction (`download` or `upload`), the path, the last error, and how
 many times it has been attempted. The record
 lives in `state.json`, so it survives a restart, and the daemon logs a warning naming the
 count after each pull rather than finishing quietly.
+
+`dbsync retry` **queues** the request rather than performing it: the daemon owns `state.json`
+and rewrites it whole, so a second process transferring behind its back would have its work
+overwritten. The request lands in a `retry-requests` file beside the state, the daemon takes
+it on its next pass, and it waits on disk if the daemon is not running. Pass `--upload` when
+the file needs *sending*, not fetching — re-fetching a path whose upload failed would pull the
+remote copy over the local edit that never got sent. A hand-asked retry also revives a
+**permanent** entry, which is the usual reason to ask: you have just renamed the file in
+Dropbox.
 
 Failures are split into two kinds:
 
@@ -202,7 +214,8 @@ Failures are split into two kinds:
   dropped from the list instead of being retried forever.
 - **Permanent** — currently only a path the local filesystem cannot represent
   (`File name too long`). Retrying cannot help, so these are never re-attempted and are listed
-  first. Renaming the file in Dropbox is the fix; it then syncs normally on the next pull.
+  first. Renaming the file in Dropbox is the fix; `dbsync retry <path>` then picks it up on
+  the next pass.
 
 A climbing `attempts` count on a retryable entry is the signal that something is wrong beyond
 bad luck.
