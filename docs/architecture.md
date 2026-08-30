@@ -454,6 +454,10 @@ in the image.
   database. Losing it means a full re-list, not data loss.
 - **Cursors expire.** A `409 reset` from `continue` is expected, not exceptional: drop the
   cursor, re-run `/files/list_folder`, and reconcile against local state.
+- **A pull that fails part-way is resumed, not restarted.** The cursor is persisted page by
+  page, so the daemon logs a failed startup pull and carries on into the watch loop rather
+  than exiting; the next notification resumes from the saved cursor. Two cases stay fatal:
+  no cursor at all (nothing to long-poll on) and a rejected credential.
 - **A listing call is retried, not surrendered.** A page of downloads that fails costs a
   page; a `list_folder`/`continue` that fails unwinds the whole pull, and on a deliberately
   cleared cursor a full-account listing is hours of work. `src/reconcile/listing.rs` retries

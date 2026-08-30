@@ -67,15 +67,3 @@ urgency = "normal"
 order = 50
 created = 2026-08-30
 tags = []
-
-[[task]]
-id = "do-not-exit-the-daemon-when-the-initial-pull-fails"
-title = "Do not exit the daemon when the initial pull fails"
-description = "daemon/mod.rs uses ? on the initial pull, so a failure after the listing retries are exhausted kills the process. The cursor is persisted per page, so carrying on into the watch loop would resume on the next notification instead of restarting the listing. Exiting is still right for config or auth errors; distinguish them."
-status = "active"
-level = "task"
-category = "bug"
-urgency = "normal"
-order = 60
-created = 2026-08-30
-tags = []
