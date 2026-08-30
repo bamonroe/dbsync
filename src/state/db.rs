@@ -47,6 +47,17 @@ pub struct SyncState {
     /// [`super::failures`].
     #[serde(default)]
     failures: BTreeMap<String, Failure>,
+
+    /// Remote paths whose local name had to be shortened, keyed by the
+    /// lowercased local path relative to the sync root.
+    ///
+    /// Without this the local-to-remote direction would be lost: the on-disk
+    /// name no longer says what the remote one was, so an edit to a shortened
+    /// file would be uploaded as a *new* remote file under the shortened name.
+    /// Only names that actually needed shortening appear here, so it is empty
+    /// for almost every account.
+    #[serde(default)]
+    aliases: BTreeMap<String, String>,
 }
 
 fn default_version() -> u32 {
@@ -66,6 +77,7 @@ impl SyncState {
             cursor: None,
             entries: BTreeMap::new(),
             failures: BTreeMap::new(),
+            aliases: BTreeMap::new(),
         }
     }
 
@@ -124,6 +136,25 @@ impl SyncState {
             .entry(key_for(path))
             .and_modify(|failure| failure.record_again(text.clone(), kind, direction))
             .or_insert_with(|| Failure::new(path, text, kind, direction));
+    }
+
+    /// Remember that the file at local path `relative` is really `display_path`
+    /// remotely, because the name had to be shortened to fit on disk.
+    pub fn record_alias(&mut self, relative: &str, display_path: &str) {
+        self.aliases
+            .insert(relative.to_lowercase(), display_path.to_string());
+    }
+
+    /// The remote path of a shortened local file, if this is one.
+    pub fn alias_for(&self, relative: &str) -> Option<&str> {
+        self.aliases
+            .get(&relative.to_lowercase())
+            .map(String::as_str)
+    }
+
+    /// How many local names had to be shortened.
+    pub fn alias_count(&self) -> usize {
+        self.aliases.len()
     }
 
     /// Forget any failure for `path`. Called on every success, so a file that

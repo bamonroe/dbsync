@@ -32,13 +32,28 @@ pub enum Pushed {
 }
 
 /// Push whatever is at `local` now: upload, delete, or decide it is unchanged.
+/// The remote path this local file belongs to.
+///
+/// Normally the on-disk name *is* the remote name, but a name too long for the
+/// filesystem was shortened on the way down, and the shortened name no longer
+/// says what the original was. Uploading under it would create a second,
+/// wrongly-named remote file, so the recorded alias wins where there is one.
+fn remote_path_of(paths: &PathMapper, state: &SyncState, local: &Path) -> Result<String> {
+    if let Ok(relative) = paths.relative_key(local)
+        && let Some(alias) = state.alias_for(&relative)
+    {
+        return Ok(alias.to_string());
+    }
+    paths.to_remote(local)
+}
+
 pub async fn push_path<S: RemoteSink>(
     sink: &S,
     paths: &PathMapper,
     state: &mut SyncState,
     local: &Path,
 ) -> Result<Pushed> {
-    let remote = paths.to_remote(local)?;
+    let remote = remote_path_of(paths, state, local)?;
     let Some(metadata) = read_metadata(local).await? else {
         return delete_remote(sink, state, &remote).await;
     };

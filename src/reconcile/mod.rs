@@ -909,6 +909,54 @@ mod tests {
         assert!(db.load().unwrap().get("/new.txt").is_some());
     }
 
+    /// The whole point of shortening: a name Linux cannot hold used to fail
+    /// permanently, so the file was simply never there.
+    #[tokio::test]
+    async fn a_file_whose_name_is_too_long_still_lands_on_disk() {
+        let mut fixture = Fixture::new(Some("c0"));
+        let long = format!("/{}.pdf", "w".repeat(400));
+        fixture.remote().put(&long, b"content");
+        fixture
+            .remote()
+            .queue_continue(page(vec![file(&long, "r1")], "c1", false));
+
+        let pull = fixture.applier.pull().await.unwrap();
+
+        assert_eq!(pull.applied, 1);
+        assert_eq!(fixture.applier.state().failure_count(), 0);
+        let local = fixture.applier.paths.to_local(&long).unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"content");
+    }
+
+    /// The shortened name no longer says what the remote one was, so without
+    /// the alias an edit would be uploaded as a second, wrongly-named file.
+    #[tokio::test]
+    async fn editing_a_shortened_file_pushes_back_to_its_real_remote_path() {
+        let mut fixture = Fixture::new(Some("c0"));
+        let long = format!("/{}.pdf", "v".repeat(400));
+        fixture.remote().put(&long, b"content");
+        fixture
+            .remote()
+            .queue_continue(page(vec![file(&long, "r1")], "c1", false));
+        fixture.applier.pull().await.unwrap();
+
+        let local = fixture.applier.paths.to_local(&long).unwrap();
+        std::fs::write(&local, b"edited").unwrap();
+        let push = fixture.applier.push(&[local]).await.unwrap();
+
+        assert_eq!(push.uploaded, 1);
+        assert_eq!(
+            fixture.remote().content(&long).as_deref(),
+            Some(&b"edited"[..]),
+            "the edit reached the original remote path, not the shortened one"
+        );
+        assert_eq!(
+            fixture.applier.state().alias_count(),
+            1,
+            "exactly one name needed an alias"
+        );
+    }
+
     /// The point of asking by hand: a permanent entry is revived, because the
     /// operator has presumably just fixed whatever made it permanent.
     #[tokio::test]

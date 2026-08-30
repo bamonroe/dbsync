@@ -31,15 +31,3 @@ urgency = "normal"
 order = 20
 created = 2026-08-29
 tags = ["state", "performance"]
-
-[[task]]
-id = "handle-remote-paths-whose-filename-exceeds-the-local-filesystem-limit"
-title = "Handle remote paths whose filename exceeds the local filesystem limit"
-description = "Three real files fail permanently with ENAMETOOLONG (os error 36) because the Dropbox name is longer than the 255-byte limit for one path component. They are recorded as permanent failures and never retried, which is correct but leaves the file absent. Shorten the component deterministically (truncate plus a short hash of the full name, keeping the extension) and record the mapping in the state so the local-to-remote direction still recognises it."
-status = "active"
-level = "task"
-category = "bug"
-urgency = "normal"
-order = 50
-created = 2026-08-30
-tags = []

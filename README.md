@@ -212,10 +212,16 @@ Failures are split into two kinds:
   would pull the remote copy over the local edit that never got sent. An entry that failed
   during *this* pass waits for the next one rather than being hammered immediately. A path deleted from Dropbox in the meantime is
   dropped from the list instead of being retried forever.
-- **Permanent** — currently only a path the local filesystem cannot represent
-  (`File name too long`). Retrying cannot help, so these are never re-attempted and are listed
-  first. Renaming the file in Dropbox is the fix; `dbsync retry <path>` then picks it up on
-  the next pass.
+- **Permanent** — an error that repeating cannot fix, so these are never re-attempted and are
+  listed first. Fix the underlying cause, then `dbsync retry <path>` picks it up on the next
+  pass.
+
+A name too long for Linux is **not** one of these. Dropbox allows filenames longer than the
+255-byte limit Linux imposes, and such a file used to fail permanently and simply never
+appear. It is now shortened on the way down — a readable prefix, a short fingerprint of the
+full name, and the original extension — so it lands and opens normally. The shortening is
+deterministic, two similar long names never collide onto one file, and editing the shortened
+file uploads back to its real Dropbox path rather than creating a second one.
 
 A climbing `attempts` count on a retryable entry is the signal that something is wrong beyond
 bad luck.

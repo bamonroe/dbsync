@@ -247,6 +247,15 @@ Three rules hold the whole thing together:
   re-lists. The re-list *reconciles*: entries whose `rev` still matches are skipped, and
   anything in the state the listing does not mention was deleted remotely while we were
   offline, so it is removed locally too.
+- **A name too long for the filesystem is shortened, not skipped.** Dropbox allows path
+  components longer than Linux's 255-byte limit, so a legal remote name can have no legal
+  local one — it used to fail with `ENAMETOOLONG` and the file was simply never there.
+  `PathMapper::to_local` keeps a readable prefix, appends a fingerprint of the *whole*
+  original name, and preserves the extension. The fingerprint is what makes it safe:
+  truncation alone would map two names sharing a long prefix onto one file. Because the
+  shortened name no longer says what the remote one was, the state carries an `aliases` index
+  from local path to remote display path, and the upload direction consults it first —
+  otherwise an edit would be uploaded as a second, wrongly-named remote file.
 - **Paths from Dropbox are untrusted.** `PathMapper` refuses any path that would escape the
   sync root rather than clamping it, and one unapplicable entry is logged and stepped over
   rather than stalling the stream behind it.

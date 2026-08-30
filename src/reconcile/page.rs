@@ -152,6 +152,28 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
     }
 
     /// Count one outcome, log a failure, and checkpoint on the interval.
+    /// Record the local name of an entry whose name had to be shortened.
+    ///
+    /// Only for names that actually differ: the alias index exists so the
+    /// upload direction can find its way back, and an entry whose local name
+    /// already matches the remote one needs no help.
+    fn remember_any_alias(&mut self, entry: &RemoteEntry) {
+        let display_path = entry.display_path();
+        let (Ok(local), Ok(plain)) = (
+            self.paths.to_local(display_path),
+            self.paths.to_local_unshortened(display_path),
+        ) else {
+            return;
+        };
+        if local == plain {
+            return;
+        }
+        let Ok(relative) = self.paths.relative_key(&local) else {
+            return;
+        };
+        self.state.record_alias(&relative, display_path);
+    }
+
     fn tally(
         &mut self,
         entry: &RemoteEntry,
@@ -165,6 +187,7 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
                 // every success is what keeps the failure list a list of things
                 // that are *currently* wrong rather than a history.
                 self.state.clear_failure(entry.display_path());
+                self.remember_any_alias(entry);
             }
             // One bad path must not stall the whole stream; the cursor still
             // advances, and a later change re-delivers the path. But it is
