@@ -14,7 +14,7 @@ services:
       # The configuration, read-only.
       - ./config.toml:/home/dbsync/config.toml:ro
       # The directory being synced. Must match `local_root` in config.toml.
-      - ${DBSYNC_LOCAL_ROOT:-/data/storage/dbsync}:/data/storage/dbsync
+      - ${DBSYNC_LOCAL_ROOT:-/data/storage/dropbox}:/data/storage/dropbox
       # Credentials and sync state, kept out of the repo and out of the image.
       # A bind mount rather than a named volume so the host and the container
       # share one store: `auth login` run on either side links both, and the

@@ -1,7 +1,7 @@
 # dbsync configuration. Copy to config.toml and edit.
 
 # The local directory kept in sync. Created if missing.
-local_root = "/data/storage/dbsync"
+local_root = "/data/storage/dropbox"
 
 # The Dropbox-side folder to mirror. "" means the app's root.
 remote_root = ""
