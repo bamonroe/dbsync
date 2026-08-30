@@ -102,9 +102,9 @@ would shred the parallelism of a first listing.
 How much may then be in flight is decided in **bytes, not files** (`src/reconcile/budget.rs`).
 A file count is the wrong unit — eight 1 KB files and eight 1 GB files are the same number and
 nothing like the same load — and the size comes with the listing, so no estimating is needed.
-Three limits interact: a byte budget (64 MB) bounds the total size in flight; a floor (4) is
+Three limits interact: a byte budget (256 MB) bounds the total size in flight; a floor (16) is
 admitted regardless of it, so one enormous file cannot serialise the small files queued behind
-it; and a ceiling (16) caps the count however tiny the files are. Where the floor and the byte
+it; and a ceiling (48) caps the count however tiny the files are. Where the floor and the byte
 budget conflict, the floor wins and the ceiling beats both, and a file larger than the whole
 budget is charged the whole budget so it runs alone rather than never. The gate is written as a
 pure counter with no network or disk dependency.
@@ -114,6 +114,23 @@ files/min** (sequential, 2.0 MiB/s over a 60s window of large files) to **304–
 across two 60s windows of small files. The two windows are not the same workload, which is the
 point of the byte budget: the sequential loop was bounded by one request at a time whatever the
 size, so the gain shows up as file rate on small files and as link saturation on large ones.
+
+The defaults themselves were then measured rather than guessed. On 2026-08-30, three cold syncs
+of the same live account — each from an empty directory, sampled over the identical first 270
+seconds so the file mix matches — gave:
+
+| `max_concurrency` / `budget_bytes` | bytes @270s | files @270s | files/min |
+|------------------------------------|-------------|-------------|-----------|
+| 16 / 64 MiB (the old defaults)      | 484 MB      | 534         | 119       |
+| **48 / 256 MiB (current)**          | **1.44 GB** | **2289**    | **509**   |
+| 96 / 512 MiB                        | 1.16 GB     | 1420        | 316       |
+
+Doubling past 48 was *slower on both axes*, and the daemon logged no rate limiting, retries or
+warnings during that run — so the loss is contention among sockets rather than Dropbox pushing
+back. Each row is a single run and the sync order is not byte-identical between them, so the
+ratios carry real noise; what the table supports is the direction and the location of the knee,
+not a precise multiplier. These are single-account figures on one link: the numbers justify the
+shipped defaults, they do not generalise.
 
 All three are **configurable** — `[download]` in `config.toml`, or the `DBSYNC_DOWNLOAD_*`
 environment overrides (README documents what an operator would change and when). They are

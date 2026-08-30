@@ -64,9 +64,9 @@ The `[download]` section tunes that:
 
 | Key               | Default | What it does                                                        |
 |-------------------|---------|---------------------------------------------------------------------|
-| `budget_bytes`    | 64 MiB  | Total size of downloads allowed in flight at once.                  |
-| `min_concurrency` | 4       | Downloads admitted regardless of the budget, so one enormous file cannot serialise the small files behind it. |
-| `max_concurrency` | 16      | Hard cap on downloads in flight, however small the files.           |
+| `budget_bytes`    | 256 MiB | Total size of downloads allowed in flight at once.                  |
+| `min_concurrency` | 16      | Downloads admitted regardless of the budget, so one enormous file cannot serialise the small files behind it. |
+| `max_concurrency` | 48      | Hard cap on downloads in flight, however small the files.           |
 | `chunk_min_size`  | 8 MiB   | Files at least this large are fetched as several byte ranges at once, not one stream. |
 | `chunk_size`      | 8 MiB   | The nominal size of each range.                                     |
 | `max_chunks`      | 64      | The most ranges one file is ever split into; past this the ranges grow instead. |
@@ -77,8 +77,9 @@ When to change them:
 - **A slow or metered link** — lower `budget_bytes`. The budget is what bounds how much of a
   large file's traffic is in flight, so it is the knob that keeps a thin pipe responsive.
 - **Many small files on a fast link** — raise `max_concurrency`. Small files never exhaust the
-  byte budget, so the count cap is what limits them. Past roughly 16 the extra sockets tend to
-  buy throughput back in Dropbox rate limits, so raise it and measure rather than guessing.
+  byte budget, so the count cap is what limits them. The default of 48 is a measured optimum on
+  one real account; raising it to 96 made a cold sync *slower*, with no rate limiting in the
+  logs, so treat it as a knob to measure rather than to turn up. See `docs/architecture.md`.
 - **Downloads are stalling behind one huge file** — raise `min_concurrency`.
 - **One large file is slow on a fast link** — that is what the chunk keys are for. A single
   stream runs at one connection's speed however large the byte budget, so a big file is split

@@ -41,13 +41,17 @@ pub struct Budget {
     pub ceiling: usize,
 }
 
-/// 64 MB in flight: enough to keep a fast link busy without holding an
-/// unbounded amount of a large file's traffic in memory and sockets.
-pub const DEFAULT_BYTES: u64 = 64 * 1024 * 1024;
+/// 256 MB in flight: enough that a handful of large files can't starve the
+/// rest of the queue, without holding an unbounded amount of traffic in
+/// memory and sockets.
+pub const DEFAULT_BYTES: u64 = 256 * 1024 * 1024;
 /// Small files should still overlap when one big file has eaten the budget.
-pub const DEFAULT_FLOOR: usize = 4;
-/// Past this, more sockets buy throughput back in rate limits.
-pub const DEFAULT_CEILING: usize = 16;
+pub const DEFAULT_FLOOR: usize = 16;
+/// Measured, not guessed: a cold sync of a real account moved 1.44 GB and
+/// 2289 files in its first 270 s at 48, against 484 MB / 534 files at 16.
+/// Doubling again to 96 made it *worse* (1.16 GB / 1420 files) with no rate
+/// limiting in the logs, so the loss there is contention, not throttling.
+pub const DEFAULT_CEILING: usize = 48;
 
 impl Default for Budget {
     fn default() -> Self {
@@ -334,8 +338,8 @@ mod tests {
     #[test]
     fn the_default_budget_is_the_documented_one() {
         let budget = Budget::default();
-        assert_eq!(budget.bytes, 64 * 1024 * 1024);
-        assert_eq!(budget.floor, 4);
-        assert_eq!(budget.ceiling, 16);
+        assert_eq!(budget.bytes, 256 * 1024 * 1024);
+        assert_eq!(budget.floor, 16);
+        assert_eq!(budget.ceiling, 48);
     }
 }
