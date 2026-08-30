@@ -16,6 +16,24 @@ something changes, then fetches the change list and applies it locally. In the o
 direction an inotify watcher picks up local edits and uploads them. Details and the reasoning
 behind that choice are in [`docs/architecture.md`](docs/architecture.md).
 
+## Quick start
+
+The whole path from a fresh clone to a running daemon, with each step explained in the
+section it links to:
+
+```sh
+git clone https://github.com/bamonroe/dbsync.git && cd dbsync
+docker compose build                       # Build
+cp config.example.toml config.toml         # Configure — then put your app key in it
+docker compose run --rm -it dbsync auth login --paste-code # Link your Dropbox account
+docker compose up -d dbsync                # Run
+```
+
+Before that will work you need a Dropbox app of your own — dbsync ships no app key. See
+[Requirements](#requirements) for the three scopes and the two app settings it needs; that
+is the one step with no shortcut. After the daemon is up, `docker compose logs -f dbsync`
+shows it working and `dbsync failures` lists anything that did not make it across.
+
 ## Requirements
 
 - Docker (or Podman) — the build and run both happen in a container; no host Rust toolchain
