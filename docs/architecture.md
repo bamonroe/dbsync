@@ -368,6 +368,7 @@ implementation yet.
 | `src/reconcile/budget.rs` | Byte-budget admission control for parallel downloads | done |
 | `src/reconcile/schedule.rs` | Splitting a page into serial and concurrent steps | done |
 | `src/reconcile/page.rs` | Applying one page, overlapping the downloads it safely can | done |
+| `src/reconcile/listing.rs` | Retrying wrappers around the two listing calls, so one dropped connection does not discard a full listing | done |
 | `src/reconcile/retry.rs` | Choosing and resolving previously-failed entries for another attempt | done |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |
 | `src/watcher/debounce.rs` | Per-path quiet-period coalescing | done |
@@ -453,6 +454,11 @@ in the image.
   database. Losing it means a full re-list, not data loss.
 - **Cursors expire.** A `409 reset` from `continue` is expected, not exceptional: drop the
   cursor, re-run `/files/list_folder`, and reconcile against local state.
+- **A listing call is retried, not surrendered.** A page of downloads that fails costs a
+  page; a `list_folder`/`continue` that fails unwinds the whole pull, and on a deliberately
+  cleared cursor a full-account listing is hours of work. `src/reconcile/listing.rs` retries
+  transient failures (dropped connections, 5xx, rate limits) with exponential backoff and
+  passes `CursorReset` straight through, because that one is an instruction to re-list.
 - **Content identity uses Dropbox's content hash** (the 4 MiB block SHA-256 tree), not mtime,
   so an echo of our own upload is recognised and not re-applied.
 - **A chunked download completes on every chunk being present**, never on the file's length.

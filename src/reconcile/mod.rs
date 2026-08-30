@@ -24,6 +24,7 @@
 mod apply;
 pub mod budget;
 mod conflict;
+mod listing;
 mod local;
 mod page;
 mod paths;
@@ -211,7 +212,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
         let mut pull = Pull::default();
         let mut cursor = cursor;
         loop {
-            let page = self.source.list_folder_continue(&cursor).await?;
+            let page = listing::list_folder_continue(&self.source, &cursor).await?;
             let has_more = page.has_more;
             cursor = page.cursor.clone();
             pull.applied += self.apply_page(page).await?;
@@ -233,7 +234,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
             ..Pull::default()
         };
         let mut seen = HashSet::new();
-        let mut page = self.source.list_folder(self.paths.remote_root()).await?;
+        let mut page = listing::list_folder(&self.source, self.paths.remote_root()).await?;
         loop {
             let has_more = page.has_more;
             for entry in &page.entries {
@@ -244,7 +245,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
                 break;
             }
             let cursor = self.state.cursor().unwrap_or_default().to_string();
-            page = self.source.list_folder_continue(&cursor).await?;
+            page = listing::list_folder_continue(&self.source, &cursor).await?;
         }
         pull.applied += self.drop_vanished(&seen).await?;
         self.db.save(&self.state)?;
