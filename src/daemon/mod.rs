@@ -165,7 +165,7 @@ fn report_failures(state: &SyncState) {
         failed = total,
         permanent,
         retryable = total - permanent,
-        "some entries are missing locally; run `dbsync failures` to list them"
+        "some entries are not in sync; run `dbsync failures` to list them"
     );
 }
 

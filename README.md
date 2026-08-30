@@ -174,27 +174,31 @@ finishes, so the state file is never left describing a half-applied change.
 
 ### Files that failed to sync
 
-A download can fail without the sync failing — a dropped connection, a Dropbox 5xx, or a
+A transfer can fail without the sync failing — a dropped connection, a Dropbox 5xx, or a
 filename longer than Linux allows. When that happens the entry is **recorded**, not just
-logged, because a failed download is otherwise invisible: the pull reports success and the
-file is simply not on disk.
+logged, because a failed transfer is otherwise invisible: the pull or push reports success
+and the file is simply not where it should be. Both directions are recorded: a download that
+never landed leaves the file missing from disk, and an upload that never went leaves your
+local edit existing only on this machine.
 
 ```sh
-dbsync failures                # everything currently missing locally
+dbsync failures                # everything currently out of sync
 dbsync failures --permanent    # only the ones that need you to act
 dbsync failures --retryable    # only the ones a retry may still fix
 ```
 
-Each line shows the path, the last error, and how many times it has been attempted. The record
+Each line shows the direction (`download` or `upload`), the path, the last error, and how
+many times it has been attempted. The record
 lives in `state.json`, so it survives a restart, and the daemon logs a warning naming the
 count after each pull rather than finishing quietly.
 
 Failures are split into two kinds:
 
-- **Retryable** — a network error or a server-side fault. Every pull re-attempts these
-  automatically, looking each path up individually, so a transient problem heals itself
-  without you doing anything. An entry that failed during *this* pull waits for the next one
-  rather than being hammered immediately. A path deleted from Dropbox in the meantime is
+- **Retryable** — a network error or a server-side fault. Every pull re-attempts the failed
+  downloads and every push re-attempts the failed uploads, so a transient problem heals itself
+  without you doing anything. The two never cross: re-fetching a path whose upload failed
+  would pull the remote copy over the local edit that never got sent. An entry that failed
+  during *this* pass waits for the next one rather than being hammered immediately. A path deleted from Dropbox in the meantime is
   dropped from the list instead of being retried forever.
 - **Permanent** — currently only a path the local filesystem cannot represent
   (`File name too long`). Retrying cannot help, so these are never re-attempted and are listed

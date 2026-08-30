@@ -21,7 +21,7 @@ use futures_util::future::join_all;
 
 use crate::api::RemoteEntry;
 use crate::error::Result;
-use crate::state::{StateDb, SyncState};
+use crate::state::{Direction, StateDb, SyncState};
 
 use super::apply::{self, Plan};
 use super::budget::Admission;
@@ -172,7 +172,8 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
             // that failed to download is silently absent from disk otherwise.
             Err(error) => {
                 tracing::warn!(path = entry.display_path(), %error, "could not apply entry");
-                self.state.record_failure(entry.display_path(), &error);
+                self.state
+                    .record_failure(entry.display_path(), &error, Direction::Download);
                 return Ok(());
             }
         }

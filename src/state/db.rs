@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::entry::SyncEntry;
-use super::failures::{self, Failure};
+use super::failures::{self, Direction, Failure};
 use crate::error::{Error, Result};
 
 /// Bumped when the on-disk shape changes incompatibly. A state file from a
@@ -117,13 +117,13 @@ impl SyncState {
 
     /// Remember that `path` could not be applied, folding into any existing
     /// record so the attempt count and first sighting survive.
-    pub fn record_failure(&mut self, path: &str, error: &Error) {
+    pub fn record_failure(&mut self, path: &str, error: &Error, direction: Direction) {
         let kind = failures::classify(error);
         let text = error.to_string();
         self.failures
             .entry(key_for(path))
-            .and_modify(|failure| failure.record_again(text.clone(), kind))
-            .or_insert_with(|| Failure::new(path, text, kind));
+            .and_modify(|failure| failure.record_again(text.clone(), kind, direction))
+            .or_insert_with(|| Failure::new(path, text, kind, direction));
     }
 
     /// Forget any failure for `path`. Called on every success, so a file that
@@ -154,9 +154,16 @@ impl SyncState {
         self.failures.len()
     }
 
-    /// The paths worth trying again, newest classification respected.
-    pub fn retryable_failures(&self) -> impl Iterator<Item = &Failure> {
-        self.failures.values().filter(|f| f.kind.is_retryable())
+    /// The paths worth trying again in `direction`, newest classification
+    /// respected.
+    ///
+    /// Filtered by direction because the two retry passes are not
+    /// interchangeable: re-fetching a path whose *upload* failed would pull the
+    /// remote copy over the local edit that never got sent.
+    pub fn retryable_failures(&self, direction: Direction) -> impl Iterator<Item = &Failure> {
+        self.failures
+            .values()
+            .filter(move |f| f.kind.is_retryable() && f.direction == direction)
     }
 }
 

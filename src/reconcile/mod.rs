@@ -49,7 +49,7 @@ use std::collections::HashSet;
 
 use crate::api::ListFolderPage;
 use crate::error::{Error, Result};
-use crate::state::{StateDb, SyncState, key_for};
+use crate::state::{Direction, StateDb, SyncState, key_for};
 
 /// What one pull did. Reported so the daemon can log it and the tests can pin
 /// the re-list path.
@@ -72,6 +72,17 @@ pub struct Push {
     pub deleted: usize,
     /// How many paths Dropbox refused, and so became conflicted copies.
     pub conflicted: usize,
+    /// How many paths failed and were recorded as still needing to be sent.
+    pub recorded: usize,
+}
+
+impl std::ops::AddAssign for Push {
+    fn add_assign(&mut self, other: Self) {
+        self.uploaded += other.uploaded;
+        self.deleted += other.deleted;
+        self.conflicted += other.conflicted;
+        self.recorded += other.recorded;
+    }
 }
 
 /// Applies changes in both directions, and owns the state between them.
@@ -288,33 +299,75 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
 
     /// Push a batch of local paths, in the order the watcher settled them.
     ///
-    /// One failing path is logged and stepped over: a file that vanished
-    /// mid-batch, or one the user cannot read, must not stop the rest.
+    /// One failing path is stepped over rather than aborting the batch: a file
+    /// that vanished mid-batch, or one the user cannot read, must not stop the
+    /// rest. It is *recorded* as well as logged, though — an upload that never
+    /// happened leaves the local edit existing only on this machine, which is
+    /// exactly as silent as a download that never landed.
+    ///
+    /// Previously-failed uploads are retried first, and for the same reason the
+    /// pull side takes its candidates before listing: a path that fails during
+    /// this batch waits for the next one instead of being retried immediately.
     pub async fn push(&mut self, batch: &[std::path::PathBuf]) -> Result<Push> {
-        let mut push = Push::default();
-        let mut changed = false;
+        let mut push = self.retry_uploads().await?;
         for local in batch {
-            match local::push_path(&self.source, &self.paths, &mut self.state, local).await {
-                Ok(Pushed::Uploaded) => {
-                    push.uploaded += 1;
-                    changed = true;
+            push += self.push_one(local).await?;
+        }
+        if push != Push::default() {
+            self.db.save(&self.state)?;
+        }
+        Ok(push)
+    }
+
+    /// Push one local path, recording the outcome against its remote path.
+    ///
+    /// Success clears any standing failure, so the record stays a list of what
+    /// is *currently* wrong rather than a history of what once was.
+    async fn push_one(&mut self, local: &std::path::Path) -> Result<Push> {
+        let mut push = Push::default();
+        let outcome = local::push_path(&self.source, &self.paths, &mut self.state, local).await;
+        // Only meaningful for a path inside the root; outside it there is no
+        // remote path to key a record by, and `push_path` ignores it anyway.
+        let remote = self.paths.to_remote(local).ok();
+        match outcome {
+            Ok(Pushed::Uploaded) => push.uploaded += 1,
+            Ok(Pushed::Deleted) => push.deleted += 1,
+            Ok(Pushed::Conflicted) => push.conflicted += 1,
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(path = %local.display(), %error, "could not push local change");
+                if let Some(remote) = &remote {
+                    self.state.record_failure(remote, &error, Direction::Upload);
+                    // Recorded state is a change worth saving even though
+                    // nothing was transferred.
+                    push.recorded += 1;
                 }
-                Ok(Pushed::Deleted) => {
-                    push.deleted += 1;
-                    changed = true;
-                }
-                Ok(Pushed::Conflicted) => {
-                    push.conflicted += 1;
-                    changed = true;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(path = %local.display(), %error, "could not push local change")
-                }
+                return Ok(push);
             }
         }
-        if changed {
-            self.db.save(&self.state)?;
+        if let Some(remote) = &remote {
+            self.state.clear_failure(remote);
+        }
+        Ok(push)
+    }
+
+    /// Re-attempt every local path recorded as having failed to upload.
+    ///
+    /// A failed upload has no second notice: the watcher fired once, the event
+    /// is consumed, and inotify will not repeat it. Without this pass the
+    /// record would only ever grow.
+    async fn retry_uploads(&mut self) -> Result<Push> {
+        let candidates: Vec<_> = self
+            .state
+            .retryable_failures(Direction::Upload)
+            .map(|failure| failure.display_path.clone())
+            .collect();
+        let mut push = Push::default();
+        for remote in candidates {
+            let Ok(local) = self.paths.to_local(&remote) else {
+                continue;
+            };
+            push += self.push_one(&local).await?;
         }
         Ok(push)
     }
@@ -815,6 +868,71 @@ mod tests {
 
         let db = StateDb::at(fixture.dir.path().join("state.json"));
         assert!(db.load().unwrap().get("/new.txt").is_some());
+    }
+
+    /// A local edit that never reached Dropbox exists only on this machine.
+    /// That is as silent as a download that never landed, so it is recorded.
+    #[tokio::test]
+    async fn a_failed_upload_is_recorded_not_just_logged() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().fail_uploads("/new.txt", 1);
+        std::fs::write(fixture.local("new.txt"), b"new").unwrap();
+
+        let push = fixture
+            .applier
+            .push(&[fixture.local("new.txt")])
+            .await
+            .unwrap();
+
+        assert_eq!(push.uploaded, 0);
+        assert_eq!(push.recorded, 1);
+        let failure = fixture.applier.state().failures().next().unwrap().clone();
+        assert_eq!(failure.display_path, "/new.txt");
+        assert_eq!(failure.direction, Direction::Upload);
+    }
+
+    /// The record is what is *currently* wrong, so a later success clears it.
+    #[tokio::test]
+    async fn a_recorded_upload_is_retried_on_the_next_push_and_then_cleared() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().fail_uploads("/new.txt", 1);
+        std::fs::write(fixture.local("new.txt"), b"new").unwrap();
+        fixture
+            .applier
+            .push(&[fixture.local("new.txt")])
+            .await
+            .unwrap();
+
+        // inotify will not fire again for this file: without the retry pass the
+        // record would only ever grow.
+        let push = fixture.applier.push(&[]).await.unwrap();
+
+        assert_eq!(push.uploaded, 1);
+        assert_eq!(fixture.applier.state().failure_count(), 0);
+        assert_eq!(
+            fixture.remote().content("/new.txt").as_deref(),
+            Some(&b"new"[..])
+        );
+    }
+
+    /// Re-fetching a path whose upload failed would pull the remote copy over
+    /// the local edit that never got sent, so the two passes never cross.
+    #[tokio::test]
+    async fn the_download_retry_pass_ignores_an_upload_failure() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().fail_uploads("/new.txt", 1);
+        std::fs::write(fixture.local("new.txt"), b"new").unwrap();
+        fixture
+            .applier
+            .push(&[fixture.local("new.txt")])
+            .await
+            .unwrap();
+
+        fixture.remote().queue_continue(page(vec![], "c1", false));
+        let pull = fixture.applier.pull().await.unwrap();
+
+        assert_eq!(pull.retried.attempted, 0);
+        assert!(fixture.remote().metadata_asked().is_empty());
     }
 
     /// One bad path in a batch must not stop the ones after it.

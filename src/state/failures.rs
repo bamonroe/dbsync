@@ -36,6 +36,35 @@ impl FailureKind {
     }
 }
 
+/// Which way the failed transfer was going.
+///
+/// A retry pass has to know: re-fetching a path that failed to *upload* would
+/// pull the remote copy over the local edit that never got sent, which is the
+/// one outcome worse than the failure itself. The two directions are therefore
+/// retried by their own halves of the reconciler and never crossed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// Remote to local: the file is missing from disk.
+    ///
+    /// The default, so a state file written before directions were recorded
+    /// loads as what it could only have held: download failures.
+    #[default]
+    Download,
+    /// Local to remote: the local edit never reached Dropbox.
+    Upload,
+}
+
+impl Direction {
+    /// How to name this direction to an operator.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Download => "download",
+            Self::Upload => "upload",
+        }
+    }
+}
+
 /// One entry that failed, and what is known about why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failure {
@@ -45,6 +74,10 @@ pub struct Failure {
     /// show it to an operator, not to match on it.
     pub error: String,
     pub kind: FailureKind,
+    /// Which way the transfer was going, so the right half of the reconciler
+    /// retries it. Defaulted on load for state files written before it existed.
+    #[serde(default)]
+    pub direction: Direction,
     /// How many times this path has now failed. A climbing count on a
     /// "transient" error is how a misclassification shows itself.
     pub attempts: u32,
@@ -60,12 +93,14 @@ impl Failure {
         display_path: impl Into<String>,
         error: impl Into<String>,
         kind: FailureKind,
+        direction: Direction,
     ) -> Self {
         let now = unix_seconds();
         Self {
             display_path: display_path.into(),
             error: error.into(),
             kind,
+            direction,
             attempts: 1,
             first_seen: now,
             last_seen: now,
@@ -77,9 +112,15 @@ impl Failure {
     /// The newest error and kind win — an entry can start out transient and be
     /// reclassified — but `first_seen` is kept, because how long something has
     /// been broken is the useful part.
-    pub fn record_again(&mut self, error: impl Into<String>, kind: FailureKind) {
+    pub fn record_again(
+        &mut self,
+        error: impl Into<String>,
+        kind: FailureKind,
+        direction: Direction,
+    ) {
         self.error = error.into();
         self.kind = kind;
+        self.direction = direction;
         self.attempts = self.attempts.saturating_add(1);
         self.last_seen = unix_seconds();
     }
@@ -129,9 +170,14 @@ mod tests {
 
     #[test]
     fn a_repeat_failure_keeps_the_first_sighting_and_counts_up() {
-        let mut failure = Failure::new("/a.txt", "boom", FailureKind::Transient);
+        let mut failure = Failure::new(
+            "/a.txt",
+            "boom",
+            FailureKind::Transient,
+            Direction::Download,
+        );
         let first = failure.first_seen;
-        failure.record_again("worse", FailureKind::Permanent);
+        failure.record_again("worse", FailureKind::Permanent, Direction::Download);
 
         assert_eq!(failure.attempts, 2);
         assert_eq!(failure.error, "worse");

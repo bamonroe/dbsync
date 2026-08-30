@@ -105,6 +105,7 @@ async fn push<S: RemoteSource + RemoteSink + Sync>(
             uploaded = push.uploaded,
             deleted = push.deleted,
             conflicted = push.conflicted,
+            recorded = push.recorded,
             "pushed local changes"
         ),
         Err(error) => tracing::warn!(%error, "push failed"),

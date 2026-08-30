@@ -22,7 +22,7 @@ pub mod hash;
 
 pub use db::{StateDb, SyncState, key_for};
 pub use entry::{SyncEntry, from_nanos, to_nanos};
-pub use failures::{Failure, FailureKind};
+pub use failures::{Direction, Failure, FailureKind};
 
 use std::path::Path;
 

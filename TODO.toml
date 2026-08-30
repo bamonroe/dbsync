@@ -45,18 +45,6 @@ created = 2026-08-30
 tags = ["cli"]
 
 [[task]]
-id = "record-failures-for-the-local-to-remote-direction-too"
-title = "Record failures for the local-to-remote direction too"
-description = "Reconciler::push logs and steps over a failing path exactly as the pull path used to, so a file that fails to upload is silently un-synced with no record. The failure store is direction-agnostic; the push path just does not write to it yet."
-status = "active"
-level = "task"
-category = "bug"
-urgency = "normal"
-order = 40
-created = 2026-08-30
-tags = ["reconcile"]
-
-[[task]]
 id = "handle-remote-paths-whose-filename-exceeds-the-local-filesystem-limit"
 title = "Handle remote paths whose filename exceeds the local filesystem limit"
 description = "Three real files fail permanently with ENAMETOOLONG (os error 36) because the Dropbox name is longer than the 255-byte limit for one path component. They are recorded as permanent failures and never retried, which is correct but leaves the file absent. Shorten the component deterministically (truncate plus a short hash of the full name, keeping the extension) and record the mapping in the state so the local-to-remote direction still recognises it."

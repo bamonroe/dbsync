@@ -165,8 +165,11 @@ fn print_failures(state: &dbsync::state::SyncState, retryable: bool, permanent: 
                 FailureKind::Transient => "retryable",
             };
             println!(
-                "{label}  attempts={}  {}\n           {}",
-                failure.attempts, failure.display_path, failure.error
+                "{label}  {}  attempts={}  {}\n           {}",
+                failure.direction.label(),
+                failure.attempts,
+                failure.display_path,
+                failure.error
             );
             shown += 1;
         }
@@ -176,7 +179,7 @@ fn print_failures(state: &dbsync::state::SyncState, retryable: bool, permanent: 
         println!("no recorded failures — everything the state knows about is on disk");
     } else {
         println!(
-            "\n{shown} entr{} missing locally",
+            "\n{shown} entr{} not in sync",
             if shown == 1 { "y" } else { "ies" }
         );
     }

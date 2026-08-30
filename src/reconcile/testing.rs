@@ -40,6 +40,9 @@ pub struct FakeRemote {
     /// Remote paths whose next `update(rev)` write is refused, the way Dropbox
     /// refuses one naming a revision that is no longer current.
     conflicts: Mutex<HashMap<String, usize>>,
+    /// Remote paths whose next `count` uploads fail outright, so a test can
+    /// see a failed upload recorded rather than merely logged.
+    upload_failures: Mutex<HashMap<String, usize>>,
     /// Metadata a test has queued for `get_metadata`, keyed by lowercased path.
     /// A path with no entry here is reported gone, which is what a retry of a
     /// since-deleted file should see.
@@ -63,6 +66,15 @@ impl FakeRemote {
 
     /// Queue a page for the next `list_folder` call.
     /// Make the next `count` updates to `path` fail with a conflict.
+    /// Make the next `count` uploads of `path` fail, the way a dropped
+    /// connection would.
+    pub fn fail_uploads(&self, path: &str, count: usize) {
+        self.upload_failures
+            .lock()
+            .unwrap()
+            .insert(path.to_lowercase(), count);
+    }
+
     pub fn refuse_updates(&self, path: &str, count: usize) {
         self.conflicts
             .lock()
@@ -250,6 +262,19 @@ impl RemoteSink for FakeRemote {
         local: &Path,
         mode: &WriteMode,
     ) -> Result<RemoteFile> {
+        if let Some(left) = self
+            .upload_failures
+            .lock()
+            .unwrap()
+            .get_mut(&remote_path.to_lowercase())
+            && *left > 0
+        {
+            *left -= 1;
+            return Err(Error::Api {
+                status: 503,
+                message: "upload failed".into(),
+            });
+        }
         if let Some(left) = self
             .conflicts
             .lock()

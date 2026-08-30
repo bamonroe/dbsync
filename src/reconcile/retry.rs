@@ -13,7 +13,7 @@
 
 use crate::api::RemoteEntry;
 use crate::error::Result;
-use crate::state::SyncState;
+use crate::state::{Direction, SyncState};
 
 /// What a retry pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +34,7 @@ pub struct Retried {
 /// longest-broken entry is tried first, so one persistently failing path cannot
 /// starve the others of attempts.
 pub fn candidates(state: &SyncState) -> Vec<String> {
-    let mut failures: Vec<_> = state.retryable_failures().collect();
+    let mut failures: Vec<_> = state.retryable_failures(Direction::Download).collect();
     failures.sort_by_key(|failure| failure.first_seen);
     failures
         .into_iter()
@@ -63,7 +63,7 @@ pub fn resolve(state: &mut SyncState, path: &str, looked_up: &Result<RemoteEntry
         }
         Ok(_) => Outcome::Fetchable,
         Err(error) => {
-            state.record_failure(path, error);
+            state.record_failure(path, error, Direction::Download);
             Outcome::StillFailing
         }
     }
@@ -98,7 +98,7 @@ mod tests {
 
     fn state_with(path: &str, error: Error) -> SyncState {
         let mut state = SyncState::new();
-        state.record_failure(path, &error);
+        state.record_failure(path, &error, Direction::Download);
         state
     }
 
@@ -168,7 +168,11 @@ mod tests {
     #[test]
     fn candidates_are_oldest_first() {
         let mut state = SyncState::new();
-        state.record_failure("/second.txt", &Error::Config("b".into()));
+        state.record_failure(
+            "/second.txt",
+            &Error::Config("b".into()),
+            Direction::Download,
+        );
         // Force a distinguishable first_seen without sleeping a whole second.
         let mut older = state.failures().next().unwrap().clone();
         older.display_path = "/first.txt".into();

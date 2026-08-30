@@ -228,6 +228,14 @@ Three rules hold the whole thing together:
   candidate list is taken *before* the listing, so an entry that fails during this pull waits
   for the next one instead of being retried seconds after it failed; a path deleted remotely
   in the meantime is resolved rather than retried forever.
+- **Both directions are recorded, and their retries never cross.** A failed *upload* is as
+  silent as a failed download — the local edit exists only on this machine, and inotify will
+  not fire a second time — so `Reconciler::push` records it too, and re-attempts the recorded
+  uploads at the start of the next push. Each failure therefore carries a `direction`, and
+  each retry pass filters on it: re-fetching a path whose upload failed would pull the remote
+  copy over the local edit that never got sent, which is worse than the failure itself. The
+  field defaults to `download` on load, so a state file written before it existed reads as
+  what it could only have held.
 - **A cursor reset is routine, not an error.** `pull` catches it, drops the cursor, and
   re-lists. The re-list *reconciles*: entries whose `rev` still matches are skipped, and
   anything in the state the listing does not mention was deleted remotely while we were
