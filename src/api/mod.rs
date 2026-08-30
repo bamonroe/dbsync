@@ -19,6 +19,7 @@ mod partial;
 mod range;
 mod upload;
 
+pub use chunks::Allowance;
 pub use client::ApiClient;
 pub use download::is_partial;
 pub use metadata::{ListFolderPage, RemoteDeleted, RemoteEntry, RemoteFile, RemoteFolder};

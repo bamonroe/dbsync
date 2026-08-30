@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "fetch-a-file-s-chunks-concurrently-without-multiplying-the-socket-count"
+title = "Fetch a file's chunks concurrently without multiplying the socket count"
+description = "Drive the planned ranges concurrently into the one partial, all addressing 'rev:<rev>' so every chunk provably comes from a single revision. Chunk concurrency must draw from the SAME admission in src/reconcile/budget.rs that bounds across-file parallelism, not a second independent pool, or the two limits multiply into far more sockets than either intends -- a file admitted for its whole size should be spending that admission on its own chunks. Decide and document how a chunk's share is accounted against the byte budget. Per-chunk failure retries just that range and leaves the other bits set; a 416 or a non-206 on a chunk invalidates the map and restarts the file rather than failing the sync."
+status = "finished"
+level = "task"
+category = "feature"
+created = 2026-08-29
+completed = 2026-08-29
+tags = []
+
+[[task]]
 id = "complete-a-chunked-download-on-every-chunk-present-never-on-length"
 title = "Complete a chunked download on 'every chunk present', never on length"
 description = "A sparse file reaches its full length the moment the LAST chunk lands, so the current 'length equals size' test would rename a hole-filled file into place -- silent corruption. The rename in download_to must be gated on every bit in the sidecar map being set, and the sidecar removed only after the rename succeeds. Add a test that writes the final chunk first and asserts nothing is renamed, and one that fills every chunk out of order and asserts the destination bytes are exactly right."

@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::api::{ListFolderPage, RemoteFile, WriteMode};
+use crate::api::{Allowance, ListFolderPage, RemoteFile, WriteMode};
 use crate::error::{Error, Result};
 
 use super::sink::RemoteSink;
@@ -157,13 +157,13 @@ impl RemoteSource for FakeRemote {
         &self,
         remote_path: &str,
         _rev: &str,
-        size: u64,
+        allowance: Allowance,
         dest: &Path,
     ) -> Result<()> {
         self.sizes_asked
             .lock()
             .unwrap()
-            .push((remote_path.to_string(), size));
+            .push((remote_path.to_string(), allowance.size));
         let content = self
             .files
             .lock()

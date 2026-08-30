@@ -16,11 +16,48 @@
 //! the chunk count, so a 100 GB file yields a manageable plan rather than tens
 //! of thousands of ranges and a bitmap to match.
 
-// Nothing fetches by chunk yet — the planner lands ahead of the download path
-// that consumes it, and its tests are what pin the arithmetic down meanwhile.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::range::ByteRange;
+
+/// What one file is allowed to spend on itself.
+///
+/// `size` is the revision's length; `budgeted` is how many of those bytes the
+/// caller's admission control actually reserved for it. The second is what
+/// bounds chunk concurrency, and that is the whole point: a file spends its
+/// *own* reservation on its own chunks rather than drawing on a second,
+/// independent pool. Two pools would multiply — sixteen files times eight
+/// chunks is a hundred and twenty-eight sockets from limits that each looked
+/// modest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Allowance {
+    /// The revision's total length.
+    pub size: u64,
+    /// How many of those bytes the caller's budget admitted.
+    pub budgeted: u64,
+}
+
+/// However large the reservation, one file opening more sockets than this buys
+/// throughput back in rate limits.
+const MAX_CHUNK_SLOTS: usize = 8;
+
+impl Allowance {
+    /// The whole file, unbudgeted — for callers with no admission control of
+    /// their own, such as tests and one-shot fetches.
+    pub fn whole(size: u64) -> Self {
+        Self {
+            size,
+            budgeted: size,
+        }
+    }
+
+    /// How many chunks of `chunk_size` may be in flight at once.
+    ///
+    /// Always at least one: a reservation smaller than a chunk still has to
+    /// make progress, it just makes it one chunk at a time.
+    pub(super) fn chunk_slots(self, chunk_size: u64) -> usize {
+        let fits = self.budgeted / chunk_size.max(1);
+        (fits as usize).clamp(1, MAX_CHUNK_SLOTS)
+    }
+}
 
 /// The limits a plan is built under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,16 +168,19 @@ impl ChunkPlan {
             self.chunk_size.min(self.size - start),
         ))
     }
-
-    /// Every chunk's range, in order.
-    pub(super) fn ranges(self) -> impl Iterator<Item = ByteRange> {
-        (0..self.count).filter_map(move |index| self.range(index))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every chunk's range, in order — how the fetch loop walks a plan, with
+    /// the indices it skips already dropped.
+    fn ranges(plan: ChunkPlan) -> Vec<ByteRange> {
+        (0..plan.count())
+            .filter_map(|index| plan.range(index))
+            .collect()
+    }
 
     /// Small enough limits to write the interesting cases by hand.
     fn limits() -> Chunking {
@@ -158,7 +198,7 @@ mod tests {
         let plan = ChunkPlan::new(0, limits());
         assert!(plan.is_whole_file());
         assert_eq!(plan.count(), 1);
-        assert_eq!(plan.ranges().count(), 1);
+        assert_eq!(ranges(plan).len(), 1);
     }
 
     /// The whole point of the threshold: a small file keeps its single request
@@ -187,7 +227,7 @@ mod tests {
         let plan = ChunkPlan::new(300, limits());
         assert_eq!(plan.count(), 3);
         assert_eq!(
-            plan.ranges().collect::<Vec<_>>(),
+            ranges(plan),
             vec![
                 ByteRange::bounded(0, 100),
                 ByteRange::bounded(100, 100),
@@ -242,11 +282,65 @@ mod tests {
             },
         );
         assert_eq!(plan.count(), 1);
-        assert_eq!(plan.ranges().count(), 1);
+        assert_eq!(ranges(plan).len(), 1);
     }
 
     /// The shipped defaults have to leave an ordinary large file genuinely
     /// parallel, or the feature does nothing in practice.
+    /// A file gets as many sockets as the bytes it actually reserved, so the
+    /// per-file and across-file limits compose instead of multiplying.
+    #[test]
+    fn chunk_slots_follow_the_bytes_actually_reserved() {
+        assert_eq!(
+            Allowance {
+                size: 1_000,
+                budgeted: 400
+            }
+            .chunk_slots(100),
+            4
+        );
+        assert_eq!(
+            Allowance {
+                size: 1_000,
+                budgeted: 1_000
+            }
+            .chunk_slots(100),
+            8
+        );
+    }
+
+    /// A reservation smaller than one chunk must still make progress.
+    #[test]
+    fn a_tiny_reservation_still_gets_one_slot() {
+        assert_eq!(
+            Allowance {
+                size: 1_000,
+                budgeted: 10
+            }
+            .chunk_slots(100),
+            1
+        );
+        // A budget of nothing is still a budget for one chunk at a time.
+        assert_eq!(
+            Allowance {
+                size: 50,
+                budgeted: 0
+            }
+            .chunk_slots(10),
+            1
+        );
+    }
+
+    /// Past the cap more sockets buy throughput back in rate limits.
+    #[test]
+    fn one_file_cannot_open_unlimited_sockets() {
+        let huge = Allowance {
+            size: u64::MAX,
+            budgeted: u64::MAX,
+        };
+        assert_eq!(huge.chunk_slots(1), MAX_CHUNK_SLOTS);
+    }
+
     #[test]
     fn the_defaults_split_a_large_file() {
         let plan = ChunkPlan::new(1024 * 1024 * 1024, Chunking::default());

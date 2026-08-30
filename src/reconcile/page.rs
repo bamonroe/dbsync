@@ -123,8 +123,12 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
 
     /// Fetch one plan, once the budget admits its bytes.
     async fn fetch(&self, plan: &Plan<'_>) -> Result<()> {
-        let _permit = self.admission.acquire(plan.size()).await;
-        apply::fetch(self.source, plan).await.map(|_| ())
+        let permit = self.admission.acquire(plan.size()).await;
+        // The permit's cost, not the file's size: an oversized file is clamped
+        // to the whole budget, and it may only spend what it actually holds.
+        apply::fetch(self.source, plan, permit.cost())
+            .await
+            .map(|_| ())
     }
 
     /// Count one outcome, log a failure, and checkpoint on the interval.

@@ -12,10 +12,11 @@
 
 use std::path::Path;
 
+use futures_util::stream::{StreamExt, TryStreamExt, iter as stream_iter};
 use serde::Serialize;
 
 use super::chunkmap::MAP_SUFFIX;
-use super::chunks::{ChunkPlan, Chunking};
+use super::chunks::{Allowance, ChunkPlan, Chunking};
 use super::client::ApiClient;
 use super::partial::Partial;
 use super::range::ByteRange;
@@ -23,6 +24,10 @@ use crate::error::{Error, Result};
 
 /// Suffix for the partial file a download writes before its rename.
 const PARTIAL_SUFFIX: &str = ".dbsync-partial";
+
+/// Tries per chunk before the whole file fails. A chunk is independent, so a
+/// transient error costs one range rather than the download.
+const CHUNK_ATTEMPTS: u32 = 3;
 
 #[derive(Serialize)]
 struct DownloadRequest<'a> {
@@ -46,23 +51,26 @@ impl ApiClient {
     /// strays from a hard kill are cleared at startup by
     /// [`crate::reconcile::sweep::partial_downloads`].
     ///
-    /// `size` decides the shape of the fetch: a small file arrives on one
+    /// `allowance` decides the shape of the fetch: a small file arrives on one
     /// stream and resumes by length, while a large one is split into fixed
-    /// chunks written at their true offsets and is only renamed once every
-    /// chunk is present.
+    /// chunks written at their true offsets, fetched as concurrently as the
+    /// bytes it was admitted for allow, and renamed only once every chunk is
+    /// present.
     pub async fn download_to(
         &self,
         remote_path: &str,
         rev: &str,
-        size: u64,
+        allowance: Allowance,
         dest: &Path,
     ) -> Result<()> {
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let plan = ChunkPlan::new(size, Chunking::default());
+        let plan = ChunkPlan::new(allowance.size, Chunking::default());
         if !plan.is_whole_file() {
-            return self.download_chunked(remote_path, rev, plan, dest).await;
+            return self
+                .download_chunked(remote_path, rev, allowance, plan, dest)
+                .await;
         }
         self.download_whole(remote_path, rev, dest).await
     }
@@ -103,41 +111,98 @@ impl ApiClient {
         Ok(())
     }
 
-    /// The chunked fetch: every missing range, into one preallocated partial.
+    /// The chunked fetch: every missing range, concurrently, into one
+    /// preallocated partial.
     ///
-    /// Sequential for now — making these overlap is what actually buys the
-    /// throughput, and it composes with the byte budget rather than being a
-    /// property of this loop.
+    /// Every chunk addresses `rev:…`, so they provably come from one revision:
+    /// a remote edit mid-download cannot splice two versions together, it
+    /// simply starts a different partial.
     ///
-    /// Every chunk addresses `rev:…`, so they provably come from one
-    /// revision: a remote edit mid-download cannot splice two versions
-    /// together, it simply starts a different partial.
+    /// A chunk that fails is retried on its own and the rest keep their bits;
+    /// only a revision-level failure — the range refused outright — throws the
+    /// partial away, because in that case no chunk of it can be trusted.
     async fn download_chunked(
         &self,
         remote_path: &str,
         rev: &str,
+        allowance: Allowance,
         plan: ChunkPlan,
         dest: &Path,
     ) -> Result<()> {
         let path = partial_path(dest, rev);
-        let mut partial = Partial::open(&path, plan).await?;
-        let missing = partial.missing();
+        let partial = Partial::open(&path, plan).await?;
+        let missing = partial.missing().await;
+        let slots = allowance.chunk_slots(plan.chunk_size());
         tracing::debug!(
             path = remote_path,
             chunks = plan.count(),
             fetching = missing.len(),
+            slots,
             "downloading in chunks"
         );
-        for index in missing {
-            let Some(range) = plan.range(index) else {
-                continue;
-            };
-            let mut response = self.request_range(rev, range).await?;
-            partial.write_chunk(index, &mut response).await?;
+
+        let outcome = stream_iter(missing)
+            .map(|index| self.fetch_chunk(rev, plan, &partial, index))
+            .buffer_unordered(slots)
+            .try_collect::<Vec<()>>()
+            .await;
+        match outcome {
+            // The revision will not serve the ranges this plan assumes, so the
+            // partial describes a file that does not exist. Start clean.
+            Err(error @ Error::Api { status: 416, .. }) => {
+                tracing::warn!(
+                    path = remote_path,
+                    "chunked download was unusable; discarding"
+                );
+                partial.abandon().await;
+                Err(error)
+            }
+            Err(error) => Err(error),
+            // Gated on every chunk being present, never on the length: the
+            // partial has been full length since the last offset was written.
+            Ok(_) => partial.finish(dest).await,
         }
-        // Gated on every chunk being present, never on the length: the partial
-        // has been full length since the last chunk's offset was written.
-        partial.finish(dest).await
+    }
+
+    /// Fetch one chunk into its slot, retrying that range alone.
+    ///
+    /// A chunk is independent: a retry re-asks for the same bytes of the same
+    /// revision, and the chunks that already landed keep their bits.
+    async fn fetch_chunk(
+        &self,
+        rev: &str,
+        plan: ChunkPlan,
+        partial: &Partial,
+        index: u32,
+    ) -> Result<()> {
+        let Some(range) = plan.range(index) else {
+            return Ok(());
+        };
+        let mut last = None;
+        for attempt in 1..=CHUNK_ATTEMPTS {
+            match self.try_chunk(rev, range, partial, index).await {
+                Ok(()) => return Ok(()),
+                // Not worth retrying: the revision does not have these bytes,
+                // and asking again will not change that.
+                Err(error @ Error::Api { status: 416, .. }) => return Err(error),
+                Err(error) => {
+                    tracing::debug!(chunk = index, attempt, %error, "retrying chunk");
+                    last = Some(error);
+                }
+            }
+        }
+        Err(last.expect("a failed chunk records its error"))
+    }
+
+    async fn try_chunk(
+        &self,
+        rev: &str,
+        range: ByteRange,
+        partial: &Partial,
+        index: u32,
+    ) -> Result<()> {
+        let mut response = self.request_range(rev, range).await?;
+        partial.write_chunk(index, &mut response).await
     }
 
     /// Ask one immutable revision for exactly `range`.

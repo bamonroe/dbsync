@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::api::{RemoteEntry, RemoteFile};
+use crate::api::{Allowance, RemoteEntry, RemoteFile};
 use crate::error::{Error, Result};
 use crate::state::{SyncState, entry_for_local_file, key_for};
 
@@ -84,7 +84,8 @@ pub async fn apply_entry<S: RemoteSource>(
     entry: &RemoteEntry,
 ) -> Result<Applied> {
     let plan = decide(paths, state, entry)?;
-    let applied = fetch(source, &plan).await?;
+    // No admission control on this path: a one-off apply spends the whole file.
+    let applied = fetch(source, &plan, plan.size()).await?;
     record(state, &plan)?;
     Ok(applied)
 }
@@ -127,7 +128,15 @@ fn decide_file<'a>(state: &SyncState, file: &'a RemoteFile, local: &Path) -> Res
 
 /// Phase two: do the network and disk work. Reads no state and writes none,
 /// which is what makes this the phase that can run many at a time.
-pub(crate) async fn fetch<S: RemoteSource>(source: &S, plan: &Plan<'_>) -> Result<Applied> {
+///
+/// `budgeted` is how many of the file's bytes admission control reserved. It
+/// travels down to the fetch because a chunked download spends that same
+/// reservation on its own chunks rather than opening a second pool of sockets.
+pub(crate) async fn fetch<S: RemoteSource>(
+    source: &S,
+    plan: &Plan<'_>,
+    budgeted: u64,
+) -> Result<Applied> {
     match &plan.action {
         Action::Skip => Ok(Applied::AlreadyCurrent),
         Action::Download { file, preserve } => {
@@ -135,7 +144,15 @@ pub(crate) async fn fetch<S: RemoteSource>(source: &S, plan: &Plan<'_>) -> Resul
                 conflict::preserve(&plan.local).await?;
             }
             source
-                .download_to(&file.path_display, &file.rev, file.size, &plan.local)
+                .download_to(
+                    &file.path_display,
+                    &file.rev,
+                    Allowance {
+                        size: file.size,
+                        budgeted,
+                    },
+                    &plan.local,
+                )
                 .await?;
             Ok(match *preserve {
                 true => Applied::Conflicted,

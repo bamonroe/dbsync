@@ -26,9 +26,9 @@ notify_fs = { package = "notify", version = "6" }
 base64 = "0.22"
 getrandom = "0.3"
 urlencoding = "2"
-# Only for `join_all`: the parallel download track drives a Vec of futures that
-# borrow the page, so tokio's fixed-arity `join!` and its 'static `JoinSet` do
-# not fit.
+# For `join_all` and `buffer_unordered`: both the parallel download track and a
+# single file's parallel chunks drive futures that borrow their caller, so
+# tokio's fixed-arity `join!` and its 'static `JoinSet` do not fit.
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }
 
 [dev-dependencies]
