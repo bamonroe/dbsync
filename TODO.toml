@@ -19,3 +19,303 @@ add_proposed_work = "Add proposed work as a new task rather than losing it."
 remove_dropped_items = "Remove dropped items with a one-line why."
 finish_work = "When a task is fully finished (built, tested, documented), run `scripts/todo.sh done <id>` to move it to FINISHED.toml."
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
+
+[[task]]
+id = "fix-cursor-reset-race-that-permanently-stalls-remote-sync"
+title = "Fix cursor-reset race that permanently stalls remote sync"
+description = "src/notify/watch.rs:128-137: after emit(RemoteEvent::CursorReset), the reconciler can finish resync and publish() the fresh cursor before the loop runs self.cursor.mark_unchanged(); that marks the new cursor as seen and cursor.changed().await parks forever. Remote changes stop arriving until restart. Rework the ordering so a publish that lands during the reset window is not swallowed."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "critical"
+order = 10
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "re-queue-pending-deltas-when-a-state-save-fails"
+title = "Re-queue pending deltas when a state save fails"
+description = "src/state/db.rs:376: save() does mem::take(&mut state.pending) up front; if the journal append and compaction fallback both fail (disk full, EIO), the taken records are lost, the next save appends only newer deltas, and after restart the state disagrees with reality (re-uploads, spurious conflicts, resurrecting deletes). Put pending back on error."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "high"
+order = 20
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "guard-against-local-edits-landing-during-a-download"
+title = "Guard against local edits landing during a download"
+description = "src/reconcile/apply.rs:127,149-167,193: has_local_edit runs in decide(), but a long chunked download then ends with a rename over dest — a user edit in that window is clobbered with no conflicted copy. Also record() hashes the file after the rename, so an edit between rename and record is stamped as the remote rev and never uploaded. Re-check divergence just before the rename, and hash the downloaded temp file (or use the known content hash) rather than the renamed dest."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "high"
+order = 30
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "drop-vanished-must-preserve-locally-edited-files"
+title = "drop_vanished must preserve locally-edited files"
+description = "src/reconcile/mod.rs:416-434: on resync, any tracked path absent from the full listing is remove_file'd unconditionally — a never-uploaded local edit is destroyed. The download path preserves diverged files via conflict::preserve; apply the same divergence check here. Also (mod.rs:426-429) one failed delete (e.g. EISDIR) aborts the whole pass after the cursor was already persisted, leaving the remaining vanished files permanently undeleted — record failures and continue instead."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "high"
+order = 40
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "whole-file-download-resume-can-splice-zero-filled-tail-after-a-crash"
+title = "Whole-file download resume can splice zero-filled tail after a crash"
+description = "src/api/download.rs:81-113,245-250: the single-stream path never fsyncs until the body ends, so after power loss the partial's length can exceed its durable content (ext4 zero-fills); the next attempt resumes at existing_len and appends, producing a corrupt middle that gets renamed into place and recorded as correct. Fsync periodically like the chunked path does, or verify the content hash before rename (see the verify-download task)."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "high"
+order = 50
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "watcher-filter-misses-state-journal-causing-a-self-feeding-sync-loop"
+title = "Watcher filter misses state.journal, causing a self-feeding sync loop"
+description = "src/watcher/mod.rs:110-114: is_state_file matches only names starting state.json, but StateDb also writes state.journal (journal.rs:71). With the state db inside the synced folder, every save triggers a watcher event, a push, another save, another journal write — an endless upload loop. Also the name-only filter means any user file named state.json* anywhere is silently never synced. Filter by the actual configured state-db paths instead of names."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "high"
+order = 60
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "retry-a-failed-pull-on-a-timer-not-only-on-the-next-remote-change"
+title = "Retry a failed pull on a timer, not only on the next remote change"
+description = "src/daemon/sync.rs:89-95: a failed pull is only logged and the nudge is consumed; if the remote then goes quiet, the account stays unsynced indefinitely. Add a backoff timer that re-nudges after a transient pull failure."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "normal"
+order = 70
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "new-files-created-under-a-shortened-path-upload-to-the-wrong-remote-path"
+title = "New files created under a shortened path upload to the wrong remote path"
+description = "src/reconcile/local.rs:41-48 + src/reconcile/paths.rs:97-112: aliases are recorded per applied entry only, so a user file created inside a locally-shortened folder (longname~a1b2c3d4/) has no alias and to_remote emits the fingerprint-mangled name, creating a duplicate remote folder tree. Resolve parent-directory aliases when mapping local paths to remote."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "normal"
+order = 80
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "biased-select-starves-local-pushes-and-lets-inotify-events-pile-up-unbounded"
+title = "Biased select starves local pushes and lets inotify events pile up unbounded"
+description = "src/daemon/sync.rs:46-67: biased; always services remote events before local batches, and each pull re-arms the long-poll — a busy shared remote can delay uploads unboundedly while the debouncer blocks and the unbounded inotify channel (watcher/mod.rs:40) grows without limit during a long pull. Alternate fairly between the two directions and/or bound the raw event channel."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "normal"
+order = 90
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "startup-sweep-deletes-all-partials-defeating-cross-restart-download-resume"
+title = "Startup sweep deletes all partials, defeating cross-restart download resume"
+description = "src/reconcile/sweep.rs:21 vs src/api/download.rs:50-53: download_to's contract keeps partials so the next attempt resumes, and ChunkMap survives reopen — but the startup sweep unconditionally removes every .dbsync-partial* file, so an interrupted large download restarts from byte zero after any daemon restart. Only sweep partials that no longer correspond to a pending download (or age them out)."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "normal"
+order = 100
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "non-ascii-remote-root-prefix-match-rejects-the-whole-account"
+title = "Non-ASCII remote-root prefix match rejects the whole account"
+description = "src/reconcile/paths.rs:123: strip_root uses eq_ignore_ascii_case; a configured root like /Ärbeit echoed by Dropbox as /ärbeit fails the match and every entry is rejected as outside the mirrored folder. Compare with Unicode-aware lowercasing consistent with key_for."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "normal"
+order = 110
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "conflicted-path-has-a-check-then-use-race-and-can-overwrite-an-earlier-conflicted-copy"
+title = "conflicted_path has a check-then-use race and can overwrite an earlier conflicted copy"
+description = "src/reconcile/conflict.rs:49-55: the while candidate.exists() probe followed later by tokio::fs::copy (which truncates) means two near-simultaneous conflicts on the same file — or an incoming download already named like a conflicted copy — can overwrite the earlier copy, the exact bytes the mechanism protects. Create the target with O_EXCL (File::create_new) and retry on collision."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "low"
+order = 120
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "move-blocking-filesystem-work-off-tokio-runtime-threads"
+title = "Move blocking filesystem work off tokio runtime threads"
+description = "Blocking calls run directly in async contexts: hash_file (src/state/hash.rs:61, full-file SHA-256 with std::fs reads) is called from reconcile/conflict.rs:88,95 and reconcile/local.rs:111; Db::save (src/state/db.rs:417-430) does sync writes plus double fsync from four async call sites in reconcile/mod.rs; sweep (src/reconcile/sweep.rs:28,51) and create_dir_all (daemon/mod.rs:86) walk the tree on the runtime thread. Wrap these in spawn_blocking (or async variants). A multi-GB hash currently stalls a worker for its whole duration."
+status = "active"
+level = "task"
+category = "refactor"
+urgency = "high"
+order = 130
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "set-connect-request-timeouts-on-the-api-client"
+title = "Set connect/request timeouts on the API client"
+description = "src/api/client.rs:37: reqwest::Client::builder().build() sets no timeouts, and the daemon serializes all sync through one loop, so a single hung request stalls everything indefinitely. Add connect_timeout and per-request timeouts on the RPC path (long-poll manages its own), plus one test pinning the behavior — no existing HTTP test covers a stall."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "high"
+order = 140
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "verify-dropbox-content-hash-before-renaming-a-download-into-place"
+title = "Verify Dropbox content_hash before renaming a download into place"
+description = "src/api/download.rs:104-112 and the chunked path rename a completed download into place without verifying content_hash; resume trusts a partial purely by length + rev-derived name. The hash algorithm already exists in state/hash.rs — verify before the rename to catch truncation/corruption cheaply. Also closes most of the crash-splice risk in the whole-file resume bug."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "normal"
+order = 150
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "honor-retry-after-on-per-file-429s"
+title = "Honor Retry-After on per-file 429s"
+description = "src/state/failures.rs:142 + src/reconcile/page.rs: Error::RateLimited is honored only on the listing loop and long-poll; a 429 on an individual transfer is classified Transient and the page keeps hammering the API immediately. Surface RateLimited from page::apply and pause the page (or whole pull) for the stated delay."
+status = "active"
+level = "task"
+category = "bug"
+urgency = "normal"
+order = 160
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "avoid-redundant-token-refreshes-after-parallel-401s"
+title = "Avoid redundant token refreshes after parallel 401s"
+description = "src/auth/provider.rs:66-70: force_refresh unconditionally clears the cache, so N parallel downloads that all hit a 401 trigger N serialized token-endpoint calls. Pass in the token that failed and skip the refresh if the cache already holds a newer one."
+status = "active"
+level = "task"
+category = "refactor"
+urgency = "low"
+order = 170
+created = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "stop-re-parsing-the-whole-journal-on-every-save"
+title = "Stop re-parsing the whole journal on every save"
+description = "src/state/db.rs:381 + src/state/journal.rs:134: save() calls journal.record_count(), implemented as replay()?.len() — it JSON-deserializes every journal record on every checkpoint, making saves O(journal length) and quadratic across a big pull. Cache the count and bump it on append (or count newlines)."
+status = "active"
+level = "task"
+category = "refactor"
+urgency = "high"
+order = 180
+created = 2026-08-30
+tags = ["review", "perf"]
+
+[[task]]
+id = "eliminate-per-chunk-8-mib-copies-on-the-upload-path"
+title = "Eliminate per-chunk 8 MiB copies on the upload path"
+description = "src/api/client.rs:135: content_upload clones the full body (up to 8 MiB per session chunk) just for the rare 401-retry path — use Bytes (cheap clone) or check token freshness first. Also src/api/upload.rs:207: read_chunk zero-fills a fresh 8 MiB Vec per chunk — use with_capacity + take().read_to_end."
+status = "active"
+level = "task"
+category = "refactor"
+urgency = "normal"
+order = 190
+created = 2026-08-30
+tags = ["review", "perf"]
+
+[[task]]
+id = "buffer-download-writes-and-keep-the-partial-file-open-across-chunks"
+title = "Buffer download writes and keep the partial file open across chunks"
+description = "src/api/download.rs:263-267 (stream_to) and src/api/partial.rs:87-92 write each ~8-16 KB network frame straight to tokio::fs::File — wrap in BufWriter::with_capacity(256KiB) and flush before sync_all (~16x fewer dispatches). Also partial.rs:77-84 re-opens the file per chunk (up to 64 opens x retries); keep one open handle and use positional writes (FileExt::write_all_at), which also removes the shared-cursor hazard noted at line 26."
+status = "active"
+level = "task"
+category = "refactor"
+urgency = "normal"
+order = 200
+created = 2026-08-30
+tags = ["review", "perf"]
+
+[[task]]
+id = "small-state-hash-perf-cleanups"
+title = "Small state/hash perf cleanups"
+description = "Three small wins: (1) src/state/hash.rs:38-48 — ContentHasher::update copies every 4 MiB block into pending before hashing; hash aligned full blocks directly to skip a full memcpy pass over all hashed bytes. (2) src/reconcile/apply.rs:275-282 — forget_subtree scans all entries with a to_lowercase alloc each even though the BTreeMap keys are already lowercased; use range() on the sorted keys. (3) src/state/db.rs:431 — snapshots use to_string_pretty, roughly doubling compaction write size; use to_string. Optionally also reuse an open handle/buffer in chunkmap.rs:180-190 mark()."
+status = "active"
+level = "task"
+category = "refactor"
+urgency = "low"
+order = 210
+created = 2026-08-30
+tags = ["review", "perf"]
+
+[[task]]
+id = "trim-cargo-toml-for-faster-builds"
+title = "Trim Cargo.toml for faster builds"
+description = "No [profile] section: add profile.release lto=\"thin\", profile.dev debug=\"line-tables-only\", and optionally profile.dev.package.\"*\" opt-level=2. Also toml = \"0.8\" pulls toml_edit via default features though dbsync only reads config — use default-features = false, features = [\"parse\"]."
+status = "active"
+level = "task"
+category = "chore"
+urgency = "low"
+order = 220
+created = 2026-08-30
+tags = ["review", "build"]
+
+[[task]]
+id = "extract-shared-fsutil-helpers-for-repeated-file-i-o-boilerplate"
+title = "Extract shared fsutil helpers for repeated file I/O boilerplate"
+description = "Four repeated patterns: atomic write-temp-sync-rename (state/db.rs:412-432 vs auth/store.rs:71-95 — atomic_write_json with optional mode); ProjectDirs default_location boilerplate (db.rs:313-317 vs store.rs:40-44 — shared data_dir()); read_to_string with NotFound-as-default (db.rs:344, store.rs:52, state/requests.rs:86, state/journal.rs:110 — read_optional()); remove-ignoring-NotFound (journal.rs:139, requests.rs:99, reconcile/sweep.rs:51 — remove_if_present()). Put them in one small fsutil module."
+status = "active"
+level = "task"
+category = "refactor"
+urgency = "normal"
+order = 230
+created = 2026-08-30
+tags = ["review", "dedup"]
+
+[[task]]
+id = "deduplicate-the-401-refresh-and-retry-block-in-apiclient"
+title = "Deduplicate the 401 refresh-and-retry block in ApiClient"
+description = "src/api/client.rs:64-73, 107-116, 134-141: rpc, content_download_from, and content_upload each hand-roll the same match-Unauthorized-force_refresh-resend block. Extract a generic with_fresh_token helper taking a send closure; the three call sites become one-liners. Pairs well with the upload-body Bytes change."
+status = "active"
+level = "task"
+category = "refactor"
+urgency = "normal"
+order = 240
+created = 2026-08-30
+tags = ["review", "dedup"]
+
+[[task]]
+id = "consolidate-duplicated-test-builders-and-fixtures"
+title = "Consolidate duplicated test builders and fixtures"
+description = "RemoteEntry builders (file/folder/tombstone) copy-pasted across five test modules (reconcile/mod.rs:443, schedule.rs:143, apply.rs:293, retry.rs:89, daemon/sync.rs:152) — move to reconcile/testing.rs, along with the duplicated ListFolderPage builders (reconcile/mod.rs:516 vs daemon/sync.rs:144) and the near-identical Fixture harness (reconcile/local.rs:193 vs apply.rs:317). Also fold the three hand-rolled reqwest::Response builders (api/client.rs:242, partial.rs:171, range.rs:127) into one cfg(test) fake_response in api/. Add Direction::from_label next to label() so requests.rs:118 stops re-hardcoding the strings."
+status = "active"
+level = "task"
+category = "test"
+urgency = "low"
+order = 250
+created = 2026-08-30
+tags = ["review", "dedup"]
