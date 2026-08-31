@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 
 use crate::api::{Allowance, RemoteEntry, RemoteFile, staged_path};
 use crate::error::{Error, Result};
-use crate::state::{SyncEntry, SyncState, entry_for_local_file, key_for};
+use crate::state::{
+    SyncEntry, SyncState, entry_for_local_file, entry_for_local_file_off_thread, key_for,
+};
 
 use super::conflict;
 use super::dircase;
@@ -103,7 +105,7 @@ pub async fn apply_entry<S: RemoteSource>(
     state: &mut SyncState,
     entry: &RemoteEntry,
 ) -> Result<Applied> {
-    let plan = decide(paths, state, entry)?;
+    let plan = decide(paths, state, entry).await?;
     // No admission control on this path: a one-off apply spends the whole file.
     let fetched = fetch(source, &plan, plan.size()).await?;
     let applied = fetched.applied;
@@ -112,7 +114,7 @@ pub async fn apply_entry<S: RemoteSource>(
 }
 
 /// Phase one: work out what to do, reading the state but touching nothing.
-pub(crate) fn decide<'a>(
+pub(crate) async fn decide<'a>(
     paths: &PathMapper,
     state: &SyncState,
     entry: &'a RemoteEntry,
@@ -122,7 +124,7 @@ pub(crate) fn decide<'a>(
     let display = dircase::canonical(state, entry.display_path());
     let local = paths.to_local(&display)?;
     let action = match entry {
-        RemoteEntry::File(file) => decide_file(state, file, &local)?,
+        RemoteEntry::File(file) => decide_file(state, file, &local).await?,
         RemoteEntry::Folder(_) => Action::Directory {
             canonical: dircase::relative(&display).to_string(),
         },
@@ -134,7 +136,11 @@ pub(crate) fn decide<'a>(
 }
 
 /// Download a file unless we already hold exactly that revision.
-fn decide_file<'a>(state: &SyncState, file: &'a RemoteFile, local: &Path) -> Result<Action<'a>> {
+async fn decide_file<'a>(
+    state: &SyncState,
+    file: &'a RemoteFile,
+    local: &Path,
+) -> Result<Action<'a>> {
     if is_current(state, file, local) {
         return Ok(Action::Skip);
     }
@@ -148,7 +154,8 @@ fn decide_file<'a>(state: &SyncState, file: &'a RemoteFile, local: &Path) -> Res
         &file.path_display,
         local,
         file.content_hash.as_deref(),
-    )?;
+    )
+    .await?;
     Ok(Action::Download { file, preserve })
 }
 
@@ -196,7 +203,8 @@ pub(crate) async fn fetch<S: RemoteSource>(
             // mtime must be the ones a local scan will actually see, or the very
             // next scan would read this file as a local edit and upload it
             // straight back.
-            let entry = entry_for_local_file(&plan.local, &file.path_display, &file.rev)?;
+            let entry =
+                entry_for_local_file_off_thread(&plan.local, &file.path_display, &file.rev).await?;
             Ok(Fetched {
                 applied: match *preserve || late_edit {
                     true => Applied::Conflicted,
@@ -709,16 +717,18 @@ mod tests {
         use super::*;
 
         /// Decide against a fresh state and an empty directory.
-        fn plan_for<'a>(fixture: &Fixture, entry: &'a RemoteEntry) -> Plan<'a> {
-            decide(&fixture.paths(), &fixture.state, entry).unwrap()
+        async fn plan_for<'a>(fixture: &Fixture, entry: &'a RemoteEntry) -> Plan<'a> {
+            decide(&fixture.paths(), &fixture.state, entry)
+                .await
+                .unwrap()
         }
 
-        #[test]
-        fn an_unknown_file_is_a_download_with_nothing_to_preserve() {
+        #[tokio::test]
+        async fn an_unknown_file_is_a_download_with_nothing_to_preserve() {
             let fixture = Fixture::new();
             let entry = file("/a.txt", "r1");
 
-            let plan = plan_for(&fixture, &entry);
+            let plan = plan_for(&fixture, &entry).await;
 
             assert!(matches!(
                 plan.action,
@@ -732,13 +742,13 @@ mod tests {
 
         /// An untracked file already sitting on the path is someone else's
         /// work until proven otherwise, so it is preserved before the download.
-        #[test]
-        fn an_untracked_local_file_is_a_download_that_preserves() {
+        #[tokio::test]
+        async fn an_untracked_local_file_is_a_download_that_preserves() {
             let fixture = Fixture::new();
             std::fs::write(fixture.local("a.txt"), b"mine").unwrap();
             let entry = file("/a.txt", "r1");
 
-            let plan = plan_for(&fixture, &entry);
+            let plan = plan_for(&fixture, &entry).await;
 
             assert!(matches!(
                 plan.action,
@@ -748,8 +758,8 @@ mod tests {
 
         /// The revision we already hold is a no-op, and deciding that must not
         /// need the network — this is what keeps a re-list cheap.
-        #[test]
-        fn a_revision_we_already_hold_is_skipped() {
+        #[tokio::test]
+        async fn a_revision_we_already_hold_is_skipped() {
             let mut fixture = Fixture::new();
             std::fs::write(fixture.local("a.txt"), b"hello").unwrap();
             fixture.state.insert(SyncEntry {
@@ -759,35 +769,42 @@ mod tests {
             });
             let entry = file("/a.txt", "r1");
 
-            assert!(matches!(plan_for(&fixture, &entry).action, Action::Skip));
+            assert!(matches!(
+                plan_for(&fixture, &entry).await.action,
+                Action::Skip
+            ));
         }
 
-        #[test]
-        fn a_tombstone_is_a_delete_and_a_folder_is_a_directory() {
+        #[tokio::test]
+        async fn a_tombstone_is_a_delete_and_a_folder_is_a_directory() {
             let fixture = Fixture::new();
             let tombstone = deleted("/gone.txt");
             let dir = folder("/photos");
 
             assert!(matches!(
-                plan_for(&fixture, &tombstone).action,
+                plan_for(&fixture, &tombstone).await.action,
                 Action::Delete {
                     display_path: "/gone.txt"
                 }
             ));
             assert!(matches!(
-                plan_for(&fixture, &dir).action,
+                plan_for(&fixture, &dir).await.action,
                 Action::Directory { .. }
             ));
         }
 
         /// A path that escapes the sync root is rejected in the decision, so no
         /// download is ever started for it.
-        #[test]
-        fn an_escaping_path_fails_before_any_work() {
+        #[tokio::test]
+        async fn an_escaping_path_fails_before_any_work() {
             let fixture = Fixture::new();
             let entry = file("/../escape.txt", "r1");
 
-            assert!(decide(&fixture.paths(), &fixture.state, &entry).is_err());
+            assert!(
+                decide(&fixture.paths(), &fixture.state, &entry)
+                    .await
+                    .is_err()
+            );
         }
     }
 

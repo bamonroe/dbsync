@@ -93,7 +93,7 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
         for entry in entries {
             let outcome = apply::apply_entry(self.source, self.paths, self.state, entry).await;
             let pause = rate_limit_of(&outcome);
-            self.tally(entry, outcome.map(|_| ()), applied)?;
+            self.tally(entry, outcome.map(|_| ()), applied).await?;
             obey(pause).await;
         }
         Ok(())
@@ -126,7 +126,7 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
     async fn apply_round(&mut self, entries: &[&RemoteEntry], applied: &mut usize) -> Result<()> {
         let mut plans: Vec<(&RemoteEntry, Plan<'_>)> = Vec::with_capacity(entries.len());
         for entry in entries {
-            match apply::decide(self.paths, self.state, entry) {
+            match apply::decide(self.paths, self.state, entry).await {
                 Ok(plan) => plans.push((entry, plan)),
                 // An entry we cannot even plan for never reaches the budget.
                 Err(error) => {
@@ -140,7 +140,7 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
         for ((entry, plan), outcome) in plans.iter().zip(fetched) {
             pause = pause.max(rate_limit_of(&outcome));
             let outcome = outcome.and_then(|fetched| apply::record(self.state, plan, fetched));
-            self.tally(entry, outcome, applied)?;
+            self.tally(entry, outcome, applied).await?;
         }
         // Dropbox named a delay; hammering on with the rest of the page would
         // only earn longer ones.
@@ -179,7 +179,7 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
         self.state.record_alias(&relative, display_path);
     }
 
-    fn tally(
+    async fn tally(
         &mut self,
         entry: &RemoteEntry,
         outcome: Result<()>,
@@ -206,7 +206,7 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
             }
         }
         if is_checkpoint(*applied, self.state.len()) {
-            self.db.save(self.state)?;
+            self.db.save_off_thread(self.state).await?;
             tracing::debug!(
                 applied = *applied,
                 tracked = self.state.len(),

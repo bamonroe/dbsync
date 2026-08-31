@@ -18,7 +18,17 @@ use crate::error::Result;
 ///
 /// Walks iteratively rather than recursively: a deep tree should not be able
 /// to overflow the stack, and this runs against whatever the user has synced.
-pub fn partial_downloads(root: &Path) -> Result<usize> {
+///
+/// The walk itself runs on the blocking pool — it stats every file in the
+/// synced tree, which on a large account is a long time to hold a runtime
+/// thread. See [`crate::blocking`].
+pub async fn partial_downloads(root: &Path) -> Result<usize> {
+    let root = root.to_path_buf();
+    crate::blocking::run(move || sweep_tree(&root)).await
+}
+
+/// The walk itself, blocking.
+fn sweep_tree(root: &Path) -> Result<usize> {
     let mut removed = 0;
     let mut pending = vec![root.to_path_buf()];
 
@@ -81,68 +91,70 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn a_leftover_partial_is_removed() {
+    #[tokio::test]
+    async fn a_leftover_partial_is_removed() {
         let dir = tree(&["a.txt.dbsync-partial"]);
-        assert_eq!(partial_downloads(dir.path()).unwrap(), 1);
+        assert_eq!(partial_downloads(dir.path()).await.unwrap(), 1);
         assert!(!dir.path().join("a.txt.dbsync-partial").exists());
     }
 
     /// The whole point is that real files are untouched.
-    #[test]
-    fn real_files_survive_the_sweep() {
+    #[tokio::test]
+    async fn real_files_survive_the_sweep() {
         let dir = tree(&["a.txt", "notes.md", "b.dbsync-partial.txt"]);
-        assert_eq!(partial_downloads(dir.path()).unwrap(), 0);
+        assert_eq!(partial_downloads(dir.path()).await.unwrap(), 0);
         assert!(dir.path().join("a.txt").exists());
         assert!(dir.path().join("b.dbsync-partial.txt").exists());
     }
 
-    #[test]
-    fn partials_are_found_at_every_depth() {
+    #[tokio::test]
+    async fn partials_are_found_at_every_depth() {
         let dir = tree(&[
             "top.dbsync-partial",
             "one/mid.dbsync-partial",
             "one/two/three/deep.dbsync-partial",
             "one/two/keep.txt",
         ]);
-        assert_eq!(partial_downloads(dir.path()).unwrap(), 3);
+        assert_eq!(partial_downloads(dir.path()).await.unwrap(), 3);
         assert!(dir.path().join("one/two/keep.txt").exists());
     }
 
     /// An interrupted chunked download — a partial with its chunk map beside
     /// it — is the very thing resume exists for; the sweep must not eat it.
-    #[test]
-    fn a_resumable_chunked_partial_survives_the_sweep() {
+    #[tokio::test]
+    async fn a_resumable_chunked_partial_survives_the_sweep() {
         let dir = tree(&[
             "big.iso.r1.dbsync-partial",
             "big.iso.r1.dbsync-partial-map",
             "small.txt.r1.dbsync-partial",
         ]);
-        assert_eq!(partial_downloads(dir.path()).unwrap(), 1);
+        assert_eq!(partial_downloads(dir.path()).await.unwrap(), 1);
         assert!(dir.path().join("big.iso.r1.dbsync-partial").exists());
         assert!(dir.path().join("big.iso.r1.dbsync-partial-map").exists());
         assert!(!dir.path().join("small.txt.r1.dbsync-partial").exists());
     }
 
     /// A map whose partial is gone carries no progress; it goes.
-    #[test]
-    fn an_orphaned_chunk_map_is_removed() {
+    #[tokio::test]
+    async fn an_orphaned_chunk_map_is_removed() {
         let dir = tree(&["big.iso.r1.dbsync-partial-map"]);
-        assert_eq!(partial_downloads(dir.path()).unwrap(), 1);
+        assert_eq!(partial_downloads(dir.path()).await.unwrap(), 1);
         assert!(!dir.path().join("big.iso.r1.dbsync-partial-map").exists());
     }
 
-    #[test]
-    fn an_empty_tree_sweeps_nothing() {
+    #[tokio::test]
+    async fn an_empty_tree_sweeps_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(partial_downloads(dir.path()).unwrap(), 0);
+        assert_eq!(partial_downloads(dir.path()).await.unwrap(), 0);
     }
 
     /// A missing root is normal on a first run and must not be an error.
-    #[test]
-    fn a_missing_root_is_not_an_error() {
+    #[tokio::test]
+    async fn a_missing_root_is_not_an_error() {
         assert_eq!(
-            partial_downloads(Path::new("/tmp/dbsync-nonexistent-root")).unwrap(),
+            partial_downloads(Path::new("/tmp/dbsync-nonexistent-root"))
+                .await
+                .unwrap(),
             0
         );
     }

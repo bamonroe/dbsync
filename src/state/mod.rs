@@ -57,6 +57,21 @@ pub fn entry_for_local_file(
     })
 }
 
+/// Describe a local file without parking a runtime worker.
+///
+/// The async twin of [`entry_for_local_file`]: it hashes, and hashing a large
+/// file is seconds of blocking work. See [`crate::blocking`].
+pub async fn entry_for_local_file_off_thread(
+    local_path: &Path,
+    display_path: impl Into<String>,
+    rev: impl Into<String>,
+) -> Result<SyncEntry> {
+    let local_path = local_path.to_path_buf();
+    let display_path = display_path.into();
+    let rev = rev.into();
+    crate::blocking::run(move || entry_for_local_file(&local_path, display_path, rev)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

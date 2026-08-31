@@ -78,6 +78,16 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize())
 }
 
+/// Compute the content hash of a file without parking a runtime worker.
+///
+/// [`hash_file`] reads and hashes the whole file; on a large one that is
+/// seconds of a thread that should be driving transfers, so the async callers
+/// go through here. See [`crate::blocking`].
+pub async fn hash_file_off_thread(path: &Path) -> Result<String> {
+    let path = path.to_path_buf();
+    crate::blocking::run(move || hash_file(&path)).await
+}
+
 /// Compute the content hash of an in-memory buffer.
 pub fn hash_bytes(data: &[u8]) -> String {
     let mut hasher = ContentHasher::new();

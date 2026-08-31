@@ -102,13 +102,13 @@ fn numbered(local: &Path, nth: u32) -> PathBuf {
 /// `incoming_hash` is the content hash of the remote version about to land.
 /// Dropbox omits it on some entries, in which case an untracked local file has
 /// to be treated as a conflict — losing a copy is worse than keeping a spare.
-pub fn has_local_edit(
+pub async fn has_local_edit(
     state: &SyncState,
     display_path: &str,
     local: &Path,
     incoming_hash: Option<&str>,
 ) -> Result<bool> {
-    let Ok(metadata) = std::fs::metadata(local) else {
+    let Ok(metadata) = tokio::fs::metadata(local).await else {
         return Ok(false);
     };
     if metadata.is_dir() {
@@ -122,14 +122,14 @@ pub fn has_local_edit(
         // way, so compare before crying conflict; otherwise every restart
         // mid-pull mints a spurious conflicted copy of its own work.
         return match incoming_hash {
-            Some(remote) => Ok(hash::hash_file(local)? != remote),
+            Some(remote) => Ok(hash::hash_file_off_thread(local).await? != remote),
             None => Ok(true),
         };
     };
     if entry.metadata_matches(metadata.len(), metadata.modified()?) {
         return Ok(false);
     }
-    Ok(entry.content_hash != hash::hash_file(local)?)
+    Ok(entry.content_hash != hash::hash_file_off_thread(local).await?)
 }
 
 #[cfg(test)]
@@ -204,53 +204,69 @@ mod tests {
         assert!(original.exists(), "the original must survive the copy");
     }
 
-    #[test]
-    fn a_missing_file_is_not_an_edit() {
+    #[tokio::test]
+    async fn a_missing_file_is_not_an_edit() {
         let state = SyncState::new();
         let missing = Path::new("/tmp/dbsync-none/gone.txt");
-        assert!(!has_local_edit(&state, "/gone.txt", missing, None).unwrap());
+        assert!(
+            !has_local_edit(&state, "/gone.txt", missing, None)
+                .await
+                .unwrap()
+        );
     }
 
-    #[test]
-    fn an_untracked_file_counts_as_an_edit() {
+    #[tokio::test]
+    async fn an_untracked_file_counts_as_an_edit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
         std::fs::write(&path, b"mine").unwrap();
-        assert!(has_local_edit(&SyncState::new(), "/a.txt", &path, None).unwrap());
+        assert!(
+            has_local_edit(&SyncState::new(), "/a.txt", &path, None)
+                .await
+                .unwrap()
+        );
     }
 
     /// The interrupted-download case: we wrote this file ourselves and died
     /// before recording it. Identical bytes are not a divergence, and calling
     /// them one is what filled the tree with spurious conflicted copies.
-    #[test]
-    fn an_untracked_file_matching_the_incoming_content_is_not_an_edit() {
+    #[tokio::test]
+    async fn an_untracked_file_matching_the_incoming_content_is_not_an_edit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
         std::fs::write(&path, b"same").unwrap();
         let incoming = crate::state::hash::hash_bytes(b"same");
 
-        assert!(!has_local_edit(&SyncState::new(), "/a.txt", &path, Some(&incoming)).unwrap());
+        assert!(
+            !has_local_edit(&SyncState::new(), "/a.txt", &path, Some(&incoming))
+                .await
+                .unwrap()
+        );
     }
 
     /// A genuinely different untracked file is still a conflict.
-    #[test]
-    fn an_untracked_file_differing_from_the_incoming_content_is_an_edit() {
+    #[tokio::test]
+    async fn an_untracked_file_differing_from_the_incoming_content_is_an_edit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
         std::fs::write(&path, b"mine").unwrap();
         let incoming = crate::state::hash::hash_bytes(b"theirs");
 
-        assert!(has_local_edit(&SyncState::new(), "/a.txt", &path, Some(&incoming)).unwrap());
+        assert!(
+            has_local_edit(&SyncState::new(), "/a.txt", &path, Some(&incoming))
+                .await
+                .unwrap()
+        );
     }
 
-    #[test]
-    fn a_file_matching_the_state_is_not_an_edit() {
+    #[tokio::test]
+    async fn a_file_matching_the_state_is_not_an_edit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
         std::fs::write(&path, b"mine").unwrap();
         let mut state = SyncState::new();
         state.insert(crate::state::entry_for_local_file(&path, "/a.txt", "r1").unwrap());
 
-        assert!(!has_local_edit(&state, "/a.txt", &path, None).unwrap());
+        assert!(!has_local_edit(&state, "/a.txt", &path, None).await.unwrap());
     }
 }

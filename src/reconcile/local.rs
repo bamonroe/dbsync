@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::api::WriteMode;
 use crate::error::{Error, Result};
-use crate::state::{SyncEntry, SyncState, entry_for_local_file, hash};
+use crate::state::{SyncEntry, SyncState, entry_for_local_file_off_thread, hash};
 
 use super::conflict;
 use super::paths::PathMapper;
@@ -143,7 +143,7 @@ async fn upload_if_changed<S: RemoteSink>(
     // The cheap check failed, so hash: an editor that rewrites a file byte for
     // byte changes its mtime without changing its content, and that must not
     // become an upload.
-    let content_hash = hash::hash_file(local)?;
+    let content_hash = hash::hash_file_off_thread(local).await?;
     if let Some(entry) = &known
         && entry.content_hash == content_hash
     {
@@ -167,11 +167,9 @@ async fn upload_if_changed<S: RemoteSink>(
         }
         Err(error) => return Err(error),
     };
-    state.insert(entry_for_local_file(
-        local,
-        &uploaded.path_display,
-        &uploaded.rev,
-    )?);
+    state.insert(
+        entry_for_local_file_off_thread(local, &uploaded.path_display, &uploaded.rev).await?,
+    );
     Ok(Pushed::Uploaded)
 }
 
@@ -192,11 +190,9 @@ async fn keep_both<S: RemoteSink>(
     let copy = conflict::preserve(local).await?;
     let remote_copy = paths.to_remote(&copy)?;
     let uploaded = sink.upload(&remote_copy, &copy, &WriteMode::Add).await?;
-    state.insert(entry_for_local_file(
-        &copy,
-        &uploaded.path_display,
-        &uploaded.rev,
-    )?);
+    state.insert(
+        entry_for_local_file_off_thread(&copy, &uploaded.path_display, &uploaded.rev).await?,
+    );
     if let Some(entry) = known {
         state.insert(refreshed(entry, metadata));
     }

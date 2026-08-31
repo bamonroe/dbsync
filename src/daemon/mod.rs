@@ -37,11 +37,11 @@ use crate::watcher;
 
 /// Run the sync daemon until a termination signal arrives.
 pub async fn run(config: &Config) -> Result<Summary> {
-    let mut reconciler = build(config)?;
+    let mut reconciler = build(config).await?;
 
     // Before the pull, while nothing is downloading: a partial being written
     // right now looks exactly like one abandoned by a kill.
-    match reconcile::sweep::partial_downloads(&config.local_root) {
+    match reconcile::sweep::partial_downloads(&config.local_root).await {
         Ok(0) => {}
         Ok(swept) => tracing::info!(swept, "removed leftover partial downloads"),
         // Scratch files left behind are not worth refusing to start over.
@@ -81,10 +81,10 @@ pub async fn run(config: &Config) -> Result<Summary> {
 }
 
 /// Assemble the reconciler: credentials, API client, path mapping, state.
-fn build(config: &Config) -> Result<Reconciler<ApiClient>> {
+async fn build(config: &Config) -> Result<Reconciler<ApiClient>> {
     // A local root that does not exist yet is normal on a first run, and the
     // watcher cannot subscribe to a missing directory.
-    std::fs::create_dir_all(&config.local_root)?;
+    tokio::fs::create_dir_all(&config.local_root).await?;
 
     let oauth = OauthClient::new(config.app_key.clone())?;
     let tokens = Arc::new(TokenProvider::new(oauth, TokenStore::default_location()?));
@@ -92,7 +92,7 @@ fn build(config: &Config) -> Result<Reconciler<ApiClient>> {
 
     let paths = PathMapper::new(&config.local_root, &config.remote_root);
     let db = StateDb::default_location()?;
-    let state = db.load()?;
+    let state = db.load_off_thread().await?;
     tracing::info!(
         state = %db.path().display(),
         tracked = state.len(),

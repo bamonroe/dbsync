@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod blocking;
 pub mod config;
 pub mod daemon;
 pub mod error;

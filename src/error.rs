@@ -44,6 +44,11 @@ pub enum Error {
     #[error("Dropbox API error ({status}): {message}")]
     Api { status: u16, message: String },
 
+    /// Work handed to the blocking pool never came back — it panicked, or the
+    /// runtime is shutting down. See [`crate::blocking`].
+    #[error("background work failed: {0}")]
+    Blocking(String),
+
     #[error(transparent)]
     Http(#[from] reqwest::Error),
 

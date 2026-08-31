@@ -90,6 +90,7 @@ fn is_transient(error: &Error) -> bool {
         Error::RateLimited(_) => true,
         Error::Api { status, .. } => *status >= 500,
         Error::CursorReset
+        | Error::Blocking(_)
         | Error::Config(_)
         | Error::ReadFile { .. }
         | Error::NotAuthenticated

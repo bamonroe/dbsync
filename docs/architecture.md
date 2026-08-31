@@ -378,6 +378,15 @@ The select is `biased` on the shutdown future, so a constantly-changing director
 the exit. `SIGINT` and `SIGTERM` mean the same thing — finish the operation in flight, drop the
 event receiver, and abort the long-poll task, which may otherwise be parked for minutes.
 
+Because both directions share that one task, **long blocking work never runs on a runtime
+thread**. Three jobs are long enough to matter — content-hashing a file, saving the state (two
+`fsync`s), and sweeping the synced tree — and each has an `async` twin that hands the work to
+tokio's blocking pool through `src/blocking.rs`: `hash_file_off_thread`, `save_off_thread` and
+`sweep::partial_downloads`. Left inline, a multi-gigabyte hash would stall every concurrent
+download and the long-poll along with it. The state is *moved* into the blocking task and moved
+back rather than cloned, since the caller holds it by `&mut` and a copy of a large account is
+the cost being avoided.
+
 ## Repository layout
 
 Per the "keep the code split up" rule in `CLAUDE.md`, each of these is its own module, not a
@@ -390,6 +399,7 @@ implementation yet.
 | `src/lib.rs` | Library root; re-exports `Config`, `Error`, `Result` | done |
 | `src/config.rs` | Load and validate `config.toml` | done |
 | `src/error.rs` | Crate-wide `Error`/`Result` | done |
+| `src/blocking.rs` | Running blocking disk work off the runtime's worker threads | done |
 | `src/notify/longpoll.rs` | The long-poll call: cursor in, outcome out | done |
 | `src/notify/backoff.rs` | Capped exponential retry curve for failed polls | done |
 | `src/notify/watch.rs` | The driving loop: holds the cursor, reconnects, emits `RemoteEvent` | done |

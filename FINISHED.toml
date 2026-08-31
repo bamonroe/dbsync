@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "move-blocking-filesystem-work-off-tokio-runtime-threads"
+title = "Move blocking filesystem work off tokio runtime threads"
+description = "Blocking calls run directly in async contexts: hash_file (src/state/hash.rs:61, full-file SHA-256 with std::fs reads) is called from reconcile/conflict.rs:88,95 and reconcile/local.rs:111; Db::save (src/state/db.rs:417-430) does sync writes plus double fsync from four async call sites in reconcile/mod.rs; sweep (src/reconcile/sweep.rs:28,51) and create_dir_all (daemon/mod.rs:86) walk the tree on the runtime thread. Wrap these in spawn_blocking (or async variants). A multi-GB hash currently stalls a worker for its whole duration."
+status = "finished"
+level = "task"
+category = "refactor"
+created = 2026-08-30
+completed = 2026-08-31
+tags = ["review"]
+
+[[task]]
 id = "honor-retry-after-on-per-file-429s"
 title = "Honor Retry-After on per-file 429s"
 description = "src/state/failures.rs:142 + src/reconcile/page.rs: Error::RateLimited is honored only on the listing loop and long-poll; a 429 on an individual transfer is classified Transient and the page keeps hammering the API immediately. Surface RateLimited from page::apply and pause the page (or whole pull) for the stated delay."

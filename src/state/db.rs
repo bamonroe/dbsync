@@ -299,6 +299,7 @@ impl SyncState {
 }
 
 /// Loads and atomically saves a [`SyncState`] at a fixed path.
+#[derive(Debug, Clone)]
 pub struct StateDb {
     path: PathBuf,
 }
@@ -338,6 +339,15 @@ impl StateDb {
         // Everything just replayed is already on disk, in the journal.
         state.pending.clear();
         Ok(state)
+    }
+
+    /// Load without parking a runtime worker.
+    ///
+    /// The async twin of [`Self::load`], which reads and parses the whole
+    /// snapshot plus its journal. See [`crate::blocking`].
+    pub async fn load_off_thread(&self) -> Result<SyncState> {
+        let db = self.clone();
+        crate::blocking::run(move || db.load()).await
     }
 
     /// Load the snapshot alone, ignoring the journal.
@@ -386,6 +396,30 @@ impl StateDb {
                 Err(error)
             }
         }
+    }
+
+    /// Save without parking a runtime worker.
+    ///
+    /// The async twin of [`Self::save`]. A save writes and then `fsync`s twice
+    /// — the file and its directory — which is exactly the kind of wait that
+    /// must not happen on a thread with downloads on it.
+    ///
+    /// The state is *moved* to the blocking thread and moved back, rather than
+    /// copied: the caller holds `&mut`, so nothing can look at it meanwhile,
+    /// and a clone of a large account is the cost this is trying to avoid. The
+    /// one thing that does not come back is a save that panics — the state is
+    /// then lost with the task, so the caller gets [`Error::Blocking`] and must
+    /// treat it as fatal rather than carrying on with an empty state.
+    pub async fn save_off_thread(&self, state: &mut SyncState) -> Result<()> {
+        let db = self.clone();
+        let mut moved = std::mem::take(state);
+        let (moved, saved) = crate::blocking::run(move || {
+            let saved = db.save(&mut moved);
+            Ok((moved, saved))
+        })
+        .await?;
+        *state = moved;
+        saved
     }
 
     /// One attempt to get `pending` onto disk, by journal append or compaction.

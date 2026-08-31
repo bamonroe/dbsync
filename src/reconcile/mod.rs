@@ -252,7 +252,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
                 }
             }
         }
-        self.db.save(&mut self.state)?;
+        self.db.save_off_thread(&mut self.state).await?;
         tracing::info!(
             attempted = retried.attempted,
             recovered = retried.recovered,
@@ -304,7 +304,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
             page = listing::list_folder_continue(&self.source, &cursor).await?;
         }
         pull.applied += self.drop_vanished(&seen).await?;
-        self.db.save(&mut self.state)?;
+        self.db.save_off_thread(&mut self.state).await?;
         Ok(pull)
     }
 
@@ -338,7 +338,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
         .apply(&entries)
         .await?;
         self.state.set_cursor(cursor);
-        self.db.save(&mut self.state)?;
+        self.db.save_off_thread(&mut self.state).await?;
         Ok(applied)
     }
 
@@ -360,7 +360,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
             push += self.push_one(local).await?;
         }
         if push != Push::default() {
-            self.db.save(&mut self.state)?;
+            self.db.save_off_thread(&mut self.state).await?;
         }
         Ok(push)
     }
@@ -433,7 +433,7 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
             // delete. Keep the bytes and forget the entry: the next local scan
             // sees an untracked file and uploads it, same as the download path
             // preserving a diverged file.
-            if conflict::has_local_edit(&self.state, &path, &local, None)? {
+            if conflict::has_local_edit(&self.state, &path, &local, None).await? {
                 tracing::warn!(
                     path = %local.display(),
                     "deleted remotely but edited locally; keeping the local version"
