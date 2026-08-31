@@ -479,9 +479,9 @@ impl StateDb {
     }
 
     /// Write the state so that a crash leaves either the old file or the new
-    /// one, never a partial one. See [`crate::fsutil::write_json_atomically`].
+    /// one, never a partial one. See [`crate::fsutil::write_json_compactly`].
     fn write_snapshot(&self, state: &SyncState) -> Result<()> {
-        crate::fsutil::write_json_atomically(&self.path, state, "sync state", None)
+        crate::fsutil::write_json_compactly(&self.path, state, "sync state")
     }
 }
 

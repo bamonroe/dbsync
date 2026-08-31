@@ -79,9 +79,23 @@ pub fn write_json_atomically<T: Serialize>(
     what: &str,
     mode: Option<u32>,
 ) -> Result<()> {
-    let json = serde_json::to_string_pretty(value)
-        .map_err(|e| Error::Config(format!("cannot serialise {what}: {e}")))?;
+    let json = serde_json::to_string_pretty(value).map_err(|e| cannot_serialise(what, &e))?;
     write_atomically(path, json.as_bytes(), mode)
+}
+
+/// [`write_json_atomically`] without the indentation.
+///
+/// For a file only ever read back by this program: pretty-printing a state
+/// snapshot of a large account roughly doubles the bytes every compaction has
+/// to write and `fsync`, which is the whole cost of the write. Files a person
+/// may open — the credential store — keep the indented form.
+pub fn write_json_compactly<T: Serialize>(path: &Path, value: &T, what: &str) -> Result<()> {
+    let json = serde_json::to_string(value).map_err(|e| cannot_serialise(what, &e))?;
+    write_atomically(path, json.as_bytes(), None)
+}
+
+fn cannot_serialise(what: &str, error: &serde_json::Error) -> Error {
+    Error::Config(format!("cannot serialise {what}: {error}"))
 }
 
 /// [`write_json_atomically`] for bytes that are already serialised.
@@ -163,6 +177,15 @@ mod tests {
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(&parent), PRIVATE_DIR_MODE);
+    }
+
+    /// The compact form round-trips and carries no indentation to pay for.
+    #[test]
+    fn a_compact_write_has_no_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("value.json");
+        write_json_compactly(&path, &vec![1, 2, 3], "numbers").unwrap();
+        assert_eq!(read_optional(&path).unwrap().unwrap(), "[1,2,3]");
     }
 
     /// An existing file is replaced, not appended to.

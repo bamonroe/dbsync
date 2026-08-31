@@ -263,6 +263,10 @@ periodically, so there is nothing to maintain. Back the two files up together; a
 without its snapshot is meaningless, and a snapshot without its journal is merely a little
 out of date.
 
+Both are JSON written without indentation — they are read back by dbsync, not by hand, and on
+a large account the whitespace would roughly double what each compaction has to write. Pipe
+either through `jq .` if you want to read one.
+
 ## Development
 
 ```sh
