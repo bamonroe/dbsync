@@ -328,7 +328,7 @@ async fn remove_local(local: &Path) -> Result<Applied> {
 mod tests {
     use super::*;
     use crate::api::ListFolderPage;
-    use crate::reconcile::testing::FakeRemote;
+    use crate::reconcile::testing::{Fixture, file, folder, tombstone};
 
     /// A remote that "takes long enough" for a local edit to land mid-transfer:
     /// it writes the edit to the real path while the download is in flight.
@@ -386,56 +386,11 @@ mod tests {
         );
     }
 
-    fn file(path: &str, rev: &str) -> RemoteEntry {
-        RemoteEntry::File(RemoteFile {
-            path_lower: path.to_lowercase(),
-            path_display: path.to_string(),
-            rev: rev.to_string(),
-            size: 0,
-            content_hash: None,
-        })
-    }
-
-    fn deleted(path: &str) -> RemoteEntry {
-        RemoteEntry::Deleted(crate::api::RemoteDeleted {
-            path_lower: path.to_lowercase(),
-            path_display: Some(path.to_string()),
-        })
-    }
-
-    fn folder(path: &str) -> RemoteEntry {
-        RemoteEntry::Folder(crate::api::RemoteFolder {
-            path_lower: path.to_lowercase(),
-            path_display: path.to_string(),
-        })
-    }
-
-    struct Fixture {
-        dir: tempfile::TempDir,
-        remote: FakeRemote,
-        state: SyncState,
-    }
-
     impl Fixture {
-        fn new() -> Self {
-            Self {
-                dir: tempfile::tempdir().unwrap(),
-                remote: FakeRemote::new(),
-                state: SyncState::new(),
-            }
-        }
-
-        fn paths(&self) -> PathMapper {
-            PathMapper::new(self.dir.path(), "")
-        }
-
+        /// Apply one entry against the fixture's own account and state.
         async fn apply(&mut self, entry: &RemoteEntry) -> Result<Applied> {
             let paths = self.paths();
             apply_entry(&self.remote, &paths, &mut self.state, entry).await
-        }
-
-        fn local(&self, relative: &str) -> std::path::PathBuf {
-            self.dir.path().join(relative)
         }
     }
 
@@ -621,7 +576,7 @@ mod tests {
         fixture.apply(&file("/a.txt", "r1")).await.unwrap();
 
         assert_eq!(
-            fixture.apply(&deleted("/a.txt")).await.unwrap(),
+            fixture.apply(&tombstone("/a.txt")).await.unwrap(),
             Applied::Deleted
         );
         assert!(!fixture.local("a.txt").exists());
@@ -638,7 +593,7 @@ mod tests {
         fixture.apply(&file("/dir/a.txt", "r1")).await.unwrap();
         fixture.apply(&file("/dir/sub/b.txt", "r1")).await.unwrap();
 
-        fixture.apply(&deleted("/dir")).await.unwrap();
+        fixture.apply(&tombstone("/dir")).await.unwrap();
         assert!(!fixture.local("dir").exists());
         assert_eq!(fixture.state.len(), 0);
     }
@@ -653,7 +608,7 @@ mod tests {
         fixture.apply(&file("/dir/a.txt", "r1")).await.unwrap();
         fixture.apply(&file("/dirty.txt", "r1")).await.unwrap();
 
-        fixture.apply(&deleted("/dir")).await.unwrap();
+        fixture.apply(&tombstone("/dir")).await.unwrap();
         assert!(fixture.local("dirty.txt").exists());
         assert!(fixture.state.get("/dirty.txt").is_some());
     }
@@ -664,7 +619,7 @@ mod tests {
     async fn deleting_something_we_never_had_is_fine() {
         let mut fixture = Fixture::new();
         assert_eq!(
-            fixture.apply(&deleted("/never.txt")).await.unwrap(),
+            fixture.apply(&tombstone("/never.txt")).await.unwrap(),
             Applied::NothingToDelete
         );
     }
@@ -763,7 +718,7 @@ mod tests {
         #[tokio::test]
         async fn a_tombstone_is_a_delete_and_a_folder_is_a_directory() {
             let fixture = Fixture::new();
-            let tombstone = deleted("/gone.txt");
+            let tombstone = tombstone("/gone.txt");
             let dir = folder("/photos");
 
             assert!(matches!(
@@ -814,7 +769,7 @@ mod tests {
             ..entry_for_local_file(&doomed.join("child.txt"), "/locked/child.txt", "r1").unwrap()
         });
 
-        let result = fixture.apply(&deleted("/locked")).await;
+        let result = fixture.apply(&tombstone("/locked")).await;
 
         // Restore permissions first so the temp directory can be cleaned up.
         let mut permissions = std::fs::metadata(&doomed).unwrap().permissions();

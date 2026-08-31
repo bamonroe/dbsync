@@ -83,18 +83,8 @@ pub enum Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{RemoteDeleted, RemoteFile};
     use crate::error::Error;
-
-    fn file(path: &str) -> RemoteEntry {
-        RemoteEntry::File(RemoteFile {
-            path_lower: path.to_lowercase(),
-            path_display: path.into(),
-            rev: "r1".into(),
-            size: 1,
-            content_hash: None,
-        })
-    }
+    use crate::reconcile::testing::{file, tombstone};
 
     fn state_with(path: &str, error: Error) -> SyncState {
         let mut state = SyncState::new();
@@ -121,10 +111,7 @@ mod tests {
     #[test]
     fn a_vanished_path_stops_being_recorded() {
         let mut state = state_with("/gone.txt", Error::Config("flaky".into()));
-        let looked_up = Ok(RemoteEntry::Deleted(RemoteDeleted {
-            path_lower: "/gone.txt".into(),
-            path_display: Some("/gone.txt".into()),
-        }));
+        let looked_up = Ok(tombstone("/gone.txt"));
 
         assert_eq!(
             resolve(&mut state, "/gone.txt", &looked_up),
@@ -154,7 +141,7 @@ mod tests {
     #[test]
     fn an_existing_path_is_fetchable() {
         let mut state = state_with("/a.txt", Error::Config("flaky".into()));
-        let looked_up = Ok(file("/a.txt"));
+        let looked_up = Ok(file("/a.txt", "r1"));
 
         assert_eq!(
             resolve(&mut state, "/a.txt", &looked_up),

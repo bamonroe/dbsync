@@ -63,6 +63,17 @@ impl Direction {
             Self::Upload => "upload",
         }
     }
+
+    /// The inverse of [`label`](Self::label): the direction an operator named,
+    /// or `None` if it names neither. Kept beside `label` so the two spellings
+    /// cannot drift apart.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "download" => Some(Self::Download),
+            "upload" => Some(Self::Upload),
+            _ => None,
+        }
+    }
 }
 
 /// One entry that failed, and what is known about why.
@@ -167,6 +178,16 @@ const ENAMETOOLONG: i32 = 36;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The retry-request file is written by an operator using the same words
+    /// the status output prints, so the two spellings have to agree.
+    #[test]
+    fn every_label_parses_back_to_its_direction() {
+        for direction in [Direction::Download, Direction::Upload] {
+            assert_eq!(Direction::from_label(direction.label()), Some(direction));
+        }
+        assert_eq!(Direction::from_label("sideways"), None);
+    }
 
     #[test]
     fn a_repeat_failure_keeps_the_first_sighting_and_counts_up() {

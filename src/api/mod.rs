@@ -18,6 +18,8 @@ mod list_folder;
 mod metadata;
 mod partial;
 mod range;
+#[cfg(test)]
+mod testing;
 mod upload;
 
 pub use chunks::{

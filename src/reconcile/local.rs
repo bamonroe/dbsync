@@ -219,39 +219,13 @@ fn refreshed(entry: &SyncEntry, metadata: &std::fs::Metadata) -> SyncEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reconcile::testing::FakeRemote;
-
-    struct Fixture {
-        dir: tempfile::TempDir,
-        remote: FakeRemote,
-        state: SyncState,
-    }
+    use crate::reconcile::testing::Fixture;
 
     impl Fixture {
-        fn new() -> Self {
-            Self {
-                dir: tempfile::tempdir().unwrap(),
-                remote: FakeRemote::new(),
-                state: SyncState::new(),
-            }
-        }
-
-        fn paths(&self) -> PathMapper {
-            PathMapper::new(self.dir.path(), "")
-        }
-
-        fn write(&self, relative: &str, content: &[u8]) -> std::path::PathBuf {
-            let path = self.dir.path().join(relative);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&path, content).unwrap();
-            path
-        }
-
+        /// Push one local path up through the fixture's own fake account.
         async fn push(&mut self, relative: &str) -> Result<Pushed> {
             let paths = self.paths();
-            let local = self.dir.path().join(relative);
+            let local = self.local(relative);
             push_path(&self.remote, &paths, &mut self.state, &local).await
         }
     }

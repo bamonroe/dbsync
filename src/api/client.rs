@@ -249,12 +249,7 @@ mod tests {
     }
 
     fn response(status: u16, body: &str) -> reqwest::Response {
-        reqwest::Response::from(
-            http::Response::builder()
-                .status(status)
-                .body(body.to_string())
-                .unwrap(),
-        )
+        super::super::testing::fake_response(status, &[], body)
     }
 
     #[tokio::test]

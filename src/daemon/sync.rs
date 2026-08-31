@@ -164,11 +164,10 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::api::{ListFolderPage, RemoteEntry, RemoteFile};
     use crate::error::Result as CrateResult;
     use crate::notify::{Longpoll, LongpollOutcome};
     use crate::reconcile::PathMapper;
-    use crate::reconcile::testing::FakeRemote;
+    use crate::reconcile::testing::{FakeRemote, file, page};
     use crate::state::{StateDb, SyncState};
 
     /// A poller that never answers: the tests drive the event channel by hand,
@@ -187,24 +186,6 @@ mod tests {
         handle
     }
 
-    fn page(cursor: &str, entries: Vec<RemoteEntry>) -> ListFolderPage {
-        ListFolderPage {
-            entries,
-            cursor: cursor.to_string(),
-            has_more: false,
-        }
-    }
-
-    fn file(path: &str, rev: &str) -> RemoteEntry {
-        RemoteEntry::File(RemoteFile {
-            path_lower: path.to_lowercase(),
-            path_display: path.to_string(),
-            rev: rev.to_string(),
-            size: 0,
-            content_hash: None,
-        })
-    }
-
     fn reconciler(remote: FakeRemote, dir: &std::path::Path) -> Reconciler<FakeRemote> {
         Reconciler::new(
             remote,
@@ -221,7 +202,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let remote = FakeRemote::new();
         remote.put("/a.txt", b"hello");
-        remote.queue_listing(Ok(page("cursor-2", vec![file("/a.txt", "r1")])));
+        remote.queue_listing(Ok(page(vec![file("/a.txt", "r1")], "cursor-2", false)));
         let mut reconciler = reconciler(remote, dir.path());
 
         let (events_tx, events) = mpsc::channel(1);
@@ -281,7 +262,7 @@ mod tests {
         // A Config error pierces the listing layer's own transient-retry loop,
         // so it reaches the sync loop as a failed pull.
         remote.queue_listing(Err(crate::error::Error::Config("boom".into())));
-        remote.queue_listing(Ok(page("cursor-2", vec![file("/a.txt", "r1")])));
+        remote.queue_listing(Ok(page(vec![file("/a.txt", "r1")], "cursor-2", false)));
         let mut reconciler = reconciler(remote, dir.path());
 
         let (events_tx, events) = mpsc::channel(1);

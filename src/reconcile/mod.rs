@@ -467,26 +467,9 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::FakeRemote;
+    use super::testing::{FakeRemote, file, tombstone};
     use super::*;
-    use crate::api::{RemoteDeleted, RemoteEntry, RemoteFile};
-
-    fn file(path: &str, rev: &str) -> RemoteEntry {
-        RemoteEntry::File(RemoteFile {
-            path_lower: path.to_lowercase(),
-            path_display: path.to_string(),
-            rev: rev.to_string(),
-            size: 0,
-            content_hash: None,
-        })
-    }
-
-    fn tombstone(path: &str) -> RemoteEntry {
-        RemoteEntry::Deleted(RemoteDeleted {
-            path_lower: path.to_lowercase(),
-            path_display: Some(path.to_string()),
-        })
-    }
+    use crate::api::RemoteEntry;
 
     /// The point of the whole failure record: a file that failed to download
     /// is silently absent from disk, and nothing in the change stream will
@@ -544,12 +527,10 @@ mod tests {
         assert_eq!(applier.state().failure_count(), 0);
     }
 
+    /// A queued page, in the `Result` the fake account's queues hold — the
+    /// same queues also take errors, so the success case is wrapped here.
     fn page(entries: Vec<RemoteEntry>, cursor: &str, has_more: bool) -> Result<ListFolderPage> {
-        Ok(ListFolderPage {
-            entries,
-            cursor: cursor.to_string(),
-            has_more,
-        })
+        Ok(testing::page(entries, cursor, has_more))
     }
 
     struct Fixture {
@@ -777,13 +758,7 @@ mod tests {
             },
         );
         fixture.remote().put("/big.bin", b"far too many bytes");
-        let entry = RemoteEntry::File(RemoteFile {
-            path_lower: "/big.bin".into(),
-            path_display: "/big.bin".into(),
-            rev: "r1".into(),
-            size: 1_000_000,
-            content_hash: None,
-        });
+        let entry = testing::sized_file("/big.bin", "r1", 1_000_000);
         fixture
             .remote()
             .queue_continue(page(vec![entry], "c1", false));

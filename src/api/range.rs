@@ -125,11 +125,11 @@ mod tests {
     }
 
     fn reply(status: u16, content_range: Option<&str>) -> reqwest::Response {
-        let mut builder = http::Response::builder().status(status);
-        if let Some(value) = content_range {
-            builder = builder.header(reqwest::header::CONTENT_RANGE, value);
-        }
-        reqwest::Response::from(builder.body(String::new()).unwrap())
+        let headers: Vec<_> = content_range
+            .map(|value| ("content-range", value))
+            .into_iter()
+            .collect();
+        super::super::testing::fake_response(status, &headers, "")
     }
 
     #[test]

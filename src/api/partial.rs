@@ -238,12 +238,7 @@ mod tests {
     }
 
     fn body(bytes: &[u8]) -> reqwest::Response {
-        reqwest::Response::from(
-            http::Response::builder()
-                .status(206)
-                .body(bytes.to_vec())
-                .unwrap(),
-        )
+        super::super::testing::fake_response(206, &[], bytes)
     }
 
     /// The bytes chunk `index` of `content` holds.

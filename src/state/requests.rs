@@ -104,11 +104,7 @@ fn parse_line(line: &str) -> Option<RetryRequest> {
     if path.is_empty() {
         return None;
     }
-    let direction = match direction {
-        "download" => Direction::Download,
-        "upload" => Direction::Upload,
-        _ => return None,
-    };
+    let direction = Direction::from_label(direction)?;
     Some(RetryRequest {
         display_path: path.to_string(),
         direction,

@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "consolidate-duplicated-test-builders-and-fixtures"
+title = "Consolidate duplicated test builders and fixtures"
+description = "RemoteEntry builders (file/folder/tombstone) copy-pasted across five test modules (reconcile/mod.rs:443, schedule.rs:143, apply.rs:293, retry.rs:89, daemon/sync.rs:152) — move to reconcile/testing.rs, along with the duplicated ListFolderPage builders (reconcile/mod.rs:516 vs daemon/sync.rs:144) and the near-identical Fixture harness (reconcile/local.rs:193 vs apply.rs:317). Also fold the three hand-rolled reqwest::Response builders (api/client.rs:242, partial.rs:171, range.rs:127) into one cfg(test) fake_response in api/. Add Direction::from_label next to label() so requests.rs:118 stops re-hardcoding the strings."
+status = "finished"
+level = "task"
+category = "test"
+created = 2026-08-30
+completed = 2026-08-31
+tags = ["review", "dedup"]
+
+[[task]]
 id = "trim-cargo-toml-for-faster-builds"
 title = "Trim Cargo.toml for faster builds"
 description = "No [profile] section: add profile.release lto=\"thin\", profile.dev debug=\"line-tables-only\", and optionally profile.dev.package.\"*\" opt-level=2. Also toml = \"0.8\" pulls toml_edit via default features though dbsync only reads config — use default-features = false, features = [\"parse\"]."

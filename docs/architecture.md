@@ -440,6 +440,7 @@ implementation yet.
 | `src/api/chunkmap.rs` | The sidecar bitmap recording which chunks have landed | done |
 | `src/api/partial.rs` | The partial file chunks are written into, and the completion gate | done |
 | `src/api/upload.rs` | `files/upload`, chunked upload sessions, and delete | done |
+| `src/api/testing.rs` | Test-only: `fake_response`, the one place a `reqwest::Response` is built from parts | done |
 | `src/reconcile/mod.rs` | `Reconciler`: both directions, owning the state between them | done |
 | `src/reconcile/paths.rs` | Dropbox path ⇄ local path, with traversal refused | done |
 | `src/reconcile/source.rs` | The `RemoteSource` trait the applier is written against | done |
@@ -455,6 +456,7 @@ implementation yet.
 | `src/reconcile/dircase.rs` | Rebuilding a remote path through the folder casings Dropbox only states on the folders' own entries | done |
 | `src/reconcile/listing.rs` | Retrying wrappers around the two listing calls, so one dropped connection does not discard a full listing | done |
 | `src/reconcile/retry.rs` | Choosing and resolving previously-failed entries for another attempt | done |
+| `src/reconcile/testing.rs` | Test-only: the `FakeRemote` account, the shared `Fixture`, and the entry/page builders every reconcile test stages from | done |
 | `src/watcher/mod.rs` | inotify subscription, filtering, and batch emission | done |
 | `src/watcher/debounce.rs` | Per-path quiet-period coalescing | done |
 | `src/daemon/mod.rs` | Building the components from config and the startup order | done |

@@ -138,31 +138,7 @@ pub fn partition(entries: &[RemoteEntry]) -> Vec<Step<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{RemoteDeleted, RemoteFile, RemoteFolder};
-
-    fn file(path: &str, rev: &str) -> RemoteEntry {
-        RemoteEntry::File(RemoteFile {
-            path_lower: path.to_lowercase(),
-            path_display: path.to_string(),
-            rev: rev.to_string(),
-            size: 0,
-            content_hash: None,
-        })
-    }
-
-    fn folder(path: &str) -> RemoteEntry {
-        RemoteEntry::Folder(RemoteFolder {
-            path_lower: path.to_lowercase(),
-            path_display: path.to_string(),
-        })
-    }
-
-    fn tombstone(path: &str) -> RemoteEntry {
-        RemoteEntry::Deleted(RemoteDeleted {
-            path_lower: path.to_lowercase(),
-            path_display: Some(path.to_string()),
-        })
-    }
+    use crate::reconcile::testing::{file, folder, tombstone};
 
     /// The paths a step covers, flattened, for terse assertions.
     fn paths(step: &Step<'_>) -> Vec<Vec<String>> {

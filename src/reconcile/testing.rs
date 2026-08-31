@@ -1,14 +1,105 @@
-//! A fake Dropbox account, for testing the applier without a network.
+//! A fake Dropbox account, and the entry builders that stage it, for testing
+//! the reconciler without a network.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::api::{Allowance, ListFolderPage, RemoteEntry, RemoteFile, WriteMode};
+use crate::api::{
+    Allowance, ListFolderPage, RemoteDeleted, RemoteEntry, RemoteFile, RemoteFolder, WriteMode,
+};
 use crate::error::{Error, Result};
+use crate::state::SyncState;
 
+use super::paths::PathMapper;
 use super::sink::RemoteSink;
 use super::source::RemoteSource;
+
+/// A remote file at `rev`, sized zero and unhashed.
+///
+/// The size and hash are what a *download* consults; every test that builds an
+/// entry by hand is exercising the routing above that, so they are left empty
+/// rather than made another knob to pass.
+pub fn file(path: &str, rev: &str) -> RemoteEntry {
+    sized_file(path, rev, 0)
+}
+
+/// The same, with the size a listing claims — what admission control reads.
+pub fn sized_file(path: &str, rev: &str, size: u64) -> RemoteEntry {
+    RemoteEntry::File(RemoteFile {
+        path_lower: path.to_lowercase(),
+        path_display: path.to_string(),
+        rev: rev.to_string(),
+        size,
+        content_hash: None,
+    })
+}
+
+/// A remote folder entry.
+pub fn folder(path: &str) -> RemoteEntry {
+    RemoteEntry::Folder(RemoteFolder {
+        path_lower: path.to_lowercase(),
+        path_display: path.to_string(),
+    })
+}
+
+/// A remote delete marker — what a listing carries in place of a removed path.
+pub fn tombstone(path: &str) -> RemoteEntry {
+    RemoteEntry::Deleted(RemoteDeleted {
+        path_lower: path.to_lowercase(),
+        path_display: Some(path.to_string()),
+    })
+}
+
+/// One listing page, ending at `cursor`.
+pub fn page(entries: Vec<RemoteEntry>, cursor: &str, has_more: bool) -> ListFolderPage {
+    ListFolderPage {
+        entries,
+        cursor: cursor.to_string(),
+        has_more,
+    }
+}
+
+/// A temp directory, a fake account, and the sync state that ties them —
+/// everything the single-path helpers (`apply_entry`, `push_path`) need.
+///
+/// The per-module verbs live in each test module as extra inherent impls, so
+/// this holds only what they all share.
+pub struct Fixture {
+    pub dir: tempfile::TempDir,
+    pub remote: FakeRemote,
+    pub state: SyncState,
+}
+
+impl Fixture {
+    pub fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().unwrap(),
+            remote: FakeRemote::new(),
+            state: SyncState::new(),
+        }
+    }
+
+    /// A mapper rooted at the temp directory, with the whole account synced.
+    pub fn paths(&self) -> PathMapper {
+        PathMapper::new(self.dir.path(), "")
+    }
+
+    /// Where `relative` sits on disk.
+    pub fn local(&self, relative: &str) -> std::path::PathBuf {
+        self.dir.path().join(relative)
+    }
+
+    /// Write `content` to `relative`, creating parents, and return its path.
+    pub fn write(&self, relative: &str, content: &[u8]) -> std::path::PathBuf {
+        let path = self.local(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+}
 
 /// An in-memory stand-in for the remote side.
 ///
