@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -131,11 +132,14 @@ impl ApiClient {
     ///
     /// Returns the raw response: some session endpoints answer with a file
     /// metadata document and others with an empty body.
+    ///
+    /// The body is [`Bytes`] rather than a `Vec` so the clone kept back for the
+    /// 401-retry path is a refcount bump, not a second copy of a whole chunk.
     pub(super) async fn content_upload<Arg: Serialize>(
         &self,
         endpoint: &str,
         arg: &Arg,
-        body: Vec<u8>,
+        body: Bytes,
     ) -> Result<reqwest::Response> {
         let url = format!("{CONTENT_HOST}/{endpoint}");
         let arg = serde_json::to_string(arg).map_err(|error| Error::Config(error.to_string()))?;
@@ -153,7 +157,7 @@ impl ApiClient {
         &self,
         url: &str,
         arg: &str,
-        body: Vec<u8>,
+        body: Bytes,
         token: String,
     ) -> Result<reqwest::Response> {
         let response = self

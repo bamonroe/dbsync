@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use super::client::ApiClient;
@@ -114,7 +115,8 @@ impl ApiClient {
             true => self.upload_session(remote_path, local, mode).await,
             false => {
                 let content = tokio::fs::read(local).await?;
-                self.upload_once(remote_path, content, mode).await
+                self.upload_once(remote_path, Bytes::from(content), mode)
+                    .await
             }
         }
     }
@@ -122,7 +124,7 @@ impl ApiClient {
     async fn upload_once(
         &self,
         remote_path: &str,
-        content: Vec<u8>,
+        content: Bytes,
         mode: &WriteMode,
     ) -> Result<RemoteFile> {
         let arg = UploadArg {
@@ -147,7 +149,7 @@ impl ApiClient {
             .content_upload(
                 "files/upload_session/start",
                 &SessionStartArg { close: false },
-                Vec::new(),
+                Bytes::new(),
             )
             .await?
             .json()
@@ -185,7 +187,7 @@ impl ApiClient {
             },
         };
         let response = self
-            .content_upload("files/upload_session/finish", &finish, Vec::new())
+            .content_upload("files/upload_session/finish", &finish, Bytes::new())
             .await?;
         Ok(response.json().await?)
     }
@@ -202,19 +204,14 @@ impl ApiClient {
 }
 
 /// Read up to [`CHUNK_SIZE`] bytes; a short read only means end of file.
-async fn read_chunk(file: &mut tokio::fs::File) -> Result<Vec<u8>> {
+///
+/// The buffer is reserved rather than zero-filled, so a chunk costs one
+/// allocation instead of an 8 MiB memset that is immediately overwritten.
+async fn read_chunk(file: &mut tokio::fs::File) -> Result<Bytes> {
     use tokio::io::AsyncReadExt;
-    let mut chunk = vec![0u8; CHUNK_SIZE];
-    let mut filled = 0;
-    while filled < CHUNK_SIZE {
-        let read = file.read(&mut chunk[filled..]).await?;
-        if read == 0 {
-            break;
-        }
-        filled += read;
-    }
-    chunk.truncate(filled);
-    Ok(chunk)
+    let mut chunk = Vec::with_capacity(CHUNK_SIZE);
+    file.take(CHUNK_SIZE as u64).read_to_end(&mut chunk).await?;
+    Ok(Bytes::from(chunk))
 }
 
 #[cfg(test)]
@@ -235,6 +232,18 @@ mod tests {
     #[test]
     fn add_serialises_as_a_bare_tag() {
         assert_eq!(arg_json(WriteMode::Add)["mode"], serde_json::json!("add"));
+    }
+
+    /// Reading walks the file chunk by chunk and then reports end of file, so
+    /// the session loop advances its offset and terminates.
+    #[tokio::test]
+    async fn read_chunk_drains_the_file_then_returns_empty() {
+        let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        tokio::fs::write(&path, b"hello").await.unwrap();
+        let mut file = tokio::fs::File::open(&path).await.unwrap();
+
+        assert_eq!(read_chunk(&mut file).await.unwrap(), &b"hello"[..]);
+        assert!(read_chunk(&mut file).await.unwrap().is_empty());
     }
 
     /// An edit must name the revision we think we are replacing, or a
