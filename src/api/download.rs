@@ -297,6 +297,25 @@ pub fn is_partial(path: &Path) -> bool {
         })
 }
 
+/// Does this partial carry resumable progress worth keeping across a restart?
+///
+/// Only a chunked download resumes, and its progress lives in the sidecar map:
+/// a partial with its map beside it is a resume in waiting, and the map is
+/// kept for as long as its partial is. Everything else — a single-stream
+/// scratch file, a staged download, an orphaned map — is dead weight.
+pub fn is_resumable_partial(path: &Path) -> bool {
+    if !is_partial(path) {
+        return false;
+    }
+    let Some(name) = path.to_str() else {
+        return false;
+    };
+    match name.strip_suffix(MAP_SUFFIX) {
+        Some(partial) => Path::new(partial).exists(),
+        None => super::chunkmap::sidecar_path(path).exists(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

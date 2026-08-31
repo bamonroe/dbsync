@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "startup-sweep-deletes-all-partials-defeating-cross-restart-download-resume"
+title = "Startup sweep deletes all partials, defeating cross-restart download resume"
+description = "src/reconcile/sweep.rs:21 vs src/api/download.rs:50-53: download_to's contract keeps partials so the next attempt resumes, and ChunkMap survives reopen — but the startup sweep unconditionally removes every .dbsync-partial* file, so an interrupted large download restarts from byte zero after any daemon restart. Only sweep partials that no longer correspond to a pending download (or age them out)."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-30
+completed = 2026-08-30
+tags = ["review"]
+
+[[task]]
 id = "biased-select-starves-local-pushes-and-lets-inotify-events-pile-up-unbounded"
 title = "Biased select starves local pushes and lets inotify events pile up unbounded"
 description = "src/daemon/sync.rs:46-67: biased; always services remote events before local batches, and each pull re-arms the long-poll — a busy shared remote can delay uploads unboundedly while the debouncer blocks and the unbounded inotify channel (watcher/mod.rs:40) grows without limit during a long pull. Alternate fairly between the two directions and/or bound the raw event channel."

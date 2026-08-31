@@ -43,9 +43,15 @@ pub fn partial_downloads(root: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-/// Delete `path` if it is a partial download. Returns 1 if it went.
+/// Delete `path` if it is a partial download with nothing worth resuming.
+/// Returns 1 if it went.
+///
+/// A chunked partial that still has its chunk map beside it is *kept*: it is
+/// exactly the interrupted large download that resume exists for, and sweeping
+/// it would restart a many-gigabyte fetch from byte zero on every daemon
+/// restart. The map is trusted, not the length — see [`crate::api::download`].
 fn remove_if_partial(path: &PathBuf) -> usize {
-    if !crate::api::is_partial(path) {
+    if !crate::api::is_partial(path) || crate::api::is_resumable_partial(path) {
         return 0;
     }
     match std::fs::remove_file(path) {
@@ -101,6 +107,29 @@ mod tests {
         ]);
         assert_eq!(partial_downloads(dir.path()).unwrap(), 3);
         assert!(dir.path().join("one/two/keep.txt").exists());
+    }
+
+    /// An interrupted chunked download — a partial with its chunk map beside
+    /// it — is the very thing resume exists for; the sweep must not eat it.
+    #[test]
+    fn a_resumable_chunked_partial_survives_the_sweep() {
+        let dir = tree(&[
+            "big.iso.r1.dbsync-partial",
+            "big.iso.r1.dbsync-partial-map",
+            "small.txt.r1.dbsync-partial",
+        ]);
+        assert_eq!(partial_downloads(dir.path()).unwrap(), 1);
+        assert!(dir.path().join("big.iso.r1.dbsync-partial").exists());
+        assert!(dir.path().join("big.iso.r1.dbsync-partial-map").exists());
+        assert!(!dir.path().join("small.txt.r1.dbsync-partial").exists());
+    }
+
+    /// A map whose partial is gone carries no progress; it goes.
+    #[test]
+    fn an_orphaned_chunk_map_is_removed() {
+        let dir = tree(&["big.iso.r1.dbsync-partial-map"]);
+        assert_eq!(partial_downloads(dir.path()).unwrap(), 1);
+        assert!(!dir.path().join("big.iso.r1.dbsync-partial-map").exists());
     }
 
     #[test]

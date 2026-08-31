@@ -25,6 +25,6 @@ pub use chunks::{
     DEFAULT_MIN_SIZE,
 };
 pub use client::ApiClient;
-pub use download::{is_partial, staged_path};
+pub use download::{is_partial, is_resumable_partial, staged_path};
 pub use metadata::{ListFolderPage, RemoteDeleted, RemoteEntry, RemoteFile, RemoteFolder};
 pub use upload::{CHUNK_SIZE, SESSION_THRESHOLD, WriteMode};
