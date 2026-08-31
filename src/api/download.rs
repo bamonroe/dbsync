@@ -5,10 +5,10 @@
 //! atomic-replace rule the state database follows.
 //!
 //! A file takes one of two shapes, decided by its size. A small one arrives on
-//! a single stream and resumes from the length of its partial. A large one is
+//! a single stream and is refetched whole if interrupted. A large one is
 //! split by [`super::chunks`] into fixed ranges written at their true offsets,
 //! where the length means nothing and completion is "every chunk present" —
-//! see [`super::partial`].
+//! see [`super::partial`]. Only the chunked shape resumes.
 
 use std::path::Path;
 
@@ -42,21 +42,21 @@ impl ApiClient {
     /// Creates `dest`'s parent directory if it is missing, since a change
     /// stream can deliver a file before the folder that contains it.
     ///
-    /// The partial file is keyed by `rev` and the resumed request asks for that
-    /// same `rev`, which together are what make continuing safe: a prefix can
-    /// only ever be extended with bytes from the revision it came from, so an
+    /// The partial file is keyed by `rev` and a resumed chunk asks for that
+    /// same `rev`, which together are what make continuing safe: a range can
+    /// only ever be filled with bytes from the revision it came from, so an
     /// edit landing mid-download starts a new partial rather than splicing two
     /// versions of the file together.
     ///
-    /// A failed attempt now *keeps* its partial so the next one can resume;
+    /// A failed chunked attempt keeps its partial so the next one can resume;
     /// strays from a hard kill are cleared at startup by
     /// [`crate::reconcile::sweep::partial_downloads`].
     ///
     /// `allowance` decides the shape of the fetch: a small file arrives on one
-    /// stream and resumes by length, while a large one is split into fixed
-    /// chunks written at their true offsets, fetched as concurrently as the
-    /// bytes it was admitted for allow, and renamed only once every chunk is
-    /// present.
+    /// stream and is refetched whole if interrupted, while a large one is split
+    /// into fixed chunks written at their true offsets, fetched as concurrently
+    /// as the bytes it was admitted for allow, and renamed only once every
+    /// chunk is present.
     pub async fn download_to(
         &self,
         remote_path: &str,
@@ -76,33 +76,19 @@ impl ApiClient {
         self.download_whole(remote_path, rev, dest).await
     }
 
-    /// The single-stream fetch: one request, appended to and renamed when the
-    /// body ends. Progress here really is the partial's length.
+    /// The single-stream fetch: one request, written out and renamed when the
+    /// body ends.
+    ///
+    /// This path never resumes. A partial's *length* cannot be trusted after a
+    /// crash — ext4 can leave the file at full length with an unsynced,
+    /// zero-filled tail, and appending after that length would splice garbage
+    /// into the middle of the finished file. A file small enough for this path
+    /// is cheap to refetch whole; only the chunked path resumes, because it
+    /// fsyncs each chunk and gates completion on its chunk map, not on length.
     async fn download_whole(&self, remote_path: &str, rev: &str, dest: &Path) -> Result<()> {
         let partial = partial_path(dest, rev);
-        let have = existing_len(&partial).await;
-
-        let mut response = match self.request_from(remote_path, rev, have).await {
-            // The range is past the end of the file: the partial is longer than
-            // the revision it claims to be, so it is garbage. Start over.
-            Err(Error::Api { status: 416, .. }) => {
-                tracing::warn!(
-                    path = remote_path,
-                    "partial download was unusable; restarting"
-                );
-                let _ = tokio::fs::remove_file(&partial).await;
-                self.request_from(remote_path, rev, 0).await?
-            }
-            other => other?,
-        };
-
-        // A server that ignored the range answers 200 with the whole file, so
-        // the partial has to be truncated rather than appended to.
-        let resuming = have > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-        let mut file = open_partial(&partial, resuming).await?;
-        if resuming {
-            tracing::debug!(path = remote_path, resumed_at = have, "resuming download");
-        }
+        let mut response = self.request_whole(remote_path).await?;
+        let mut file = tokio::fs::File::create(&partial).await?;
 
         // Stream rather than buffer: a synced folder may hold files far larger
         // than the daemon's memory budget.
@@ -218,46 +204,15 @@ impl ApiClient {
         .await
     }
 
-    /// Ask for `rev`, from `offset` onwards when that is not the start.
-    async fn request_from(
-        &self,
-        remote_path: &str,
-        rev: &str,
-        offset: u64,
-    ) -> Result<reqwest::Response> {
-        // `rev:…` addresses one immutable revision; the display path would
-        // return whatever is current, which is not what a resume may append to.
-        let by_rev = format!("rev:{rev}");
-        let path = match offset {
-            0 => remote_path,
-            _ => &by_rev,
-        };
+    /// Ask for a whole file from its start.
+    async fn request_whole(&self, remote_path: &str) -> Result<reqwest::Response> {
         self.content_download_from(
             "files/download",
-            &DownloadRequest { path },
-            ByteRange::from(offset),
+            &DownloadRequest { path: remote_path },
+            ByteRange::from(0),
         )
         .await
     }
-}
-
-/// How many bytes of this download are already on disk.
-async fn existing_len(partial: &Path) -> u64 {
-    tokio::fs::metadata(partial)
-        .await
-        .map(|meta| meta.len())
-        .unwrap_or(0)
-}
-
-/// Open the partial for appending when resuming, or truncate it when not.
-async fn open_partial(partial: &Path, resuming: bool) -> Result<tokio::fs::File> {
-    if !resuming {
-        return Ok(tokio::fs::File::create(partial).await?);
-    }
-    Ok(tokio::fs::OpenOptions::new()
-        .append(true)
-        .open(partial)
-        .await?)
 }
 
 async fn stream_to(response: &mut reqwest::Response, file: &mut tokio::fs::File) -> Result<()> {
