@@ -377,12 +377,25 @@ impl StateDb {
         if pending.is_empty() && self.path.exists() {
             return Ok(());
         }
+        match self.persist(state, &pending) {
+            Ok(()) => Ok(()),
+            // A failed write must not lose the deltas: put them back so the
+            // next save retries them instead of silently diverging from disk.
+            Err(error) => {
+                state.pending = pending;
+                Err(error)
+            }
+        }
+    }
+
+    /// One attempt to get `pending` onto disk, by journal append or compaction.
+    fn persist(&self, state: &SyncState, pending: &[Record]) -> Result<()> {
         let journal = self.journal();
         let folded = journal.record_count().unwrap_or(0) + pending.len();
         if !self.path.exists() || folded >= COMPACT_AFTER {
             return self.compact(state);
         }
-        match journal.append(&pending) {
+        match journal.append(pending) {
             Ok(()) => Ok(()),
             // Losing the journal is survivable; losing the change is not. Fall
             // back to the whole-file write rather than dropping it.
@@ -450,6 +463,25 @@ mod tests {
             size: 7,
             display_path: path.into(),
         }
+    }
+
+    /// A save that fails to reach disk must leave the deltas queued, so the
+    /// next save retries them instead of silently diverging from disk.
+    #[test]
+    fn a_failed_save_keeps_the_pending_records() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the parent directory should be makes every write fail.
+        let blocker = dir.path().join("nested");
+        std::fs::write(&blocker, b"in the way").unwrap();
+        let db = StateDb::at(blocker.join("state.json"));
+
+        let mut state = SyncState::new();
+        state.insert(entry("/a.txt"));
+        assert!(db.save(&mut state).is_err());
+
+        std::fs::remove_file(&blocker).unwrap();
+        db.save(&mut state).unwrap();
+        assert!(db.load().unwrap().get("/a.txt").is_some());
     }
 
     #[test]
