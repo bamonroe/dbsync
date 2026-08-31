@@ -17,6 +17,28 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "biased-select-starves-local-pushes-and-lets-inotify-events-pile-up-unbounded"
+title = "Biased select starves local pushes and lets inotify events pile up unbounded"
+description = "src/daemon/sync.rs:46-67: biased; always services remote events before local batches, and each pull re-arms the long-poll — a busy shared remote can delay uploads unboundedly while the debouncer blocks and the unbounded inotify channel (watcher/mod.rs:40) grows without limit during a long pull. Alternate fairly between the two directions and/or bound the raw event channel."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-30
+completed = 2026-08-30
+tags = ["review"]
+
+[[task]]
+id = "retry-a-failed-pull-on-a-timer-not-only-on-the-next-remote-change"
+title = "Retry a failed pull on a timer, not only on the next remote change"
+description = "src/daemon/sync.rs:89-95: a failed pull is only logged and the nudge is consumed; if the remote then goes quiet, the account stays unsynced indefinitely. Add a backoff timer that re-nudges after a transient pull failure."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-30
+completed = 2026-08-30
+tags = ["review"]
+
+[[task]]
 id = "set-connect-request-timeouts-on-the-api-client"
 title = "Set connect/request timeouts on the API client"
 description = "src/api/client.rs:37: reqwest::Client::builder().build() sets no timeouts, and the daemon serializes all sync through one loop, so a single hung request stalls everything indefinitely. Add connect_timeout and per-request timeouts on the RPC path (long-poll manages its own), plus one test pinning the behavior — no existing HTTP test covers a stall."

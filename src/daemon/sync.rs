@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::notify::{CursorHandle, RemoteEvent};
+use crate::notify::{Backoff, CursorHandle, RemoteEvent};
 use crate::reconcile::{Reconciler, RemoteSink, RemoteSource};
 
 /// What one run of the loop did, for logging and for the tests.
@@ -42,57 +42,103 @@ pub async fn run<S: RemoteSource + RemoteSink + Sync>(
 ) -> Result<Summary> {
     let mut summary = Summary::default();
     tokio::pin!(shutdown);
+    let mut backoff = Backoff::new();
+    // When a pull fails, this timer re-tries it. A transient network error is
+    // otherwise unsynced indefinitely: the nudge that triggered the pull is
+    // consumed, and a quiet remote sends no other.
+    let mut retry_at: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
-            // Biased so a pending shutdown wins over a busy channel; without
-            // it, a directory changing constantly could starve the exit.
+            // Biased so a pending shutdown wins over busy channels. The two
+            // work channels are raced *fairly* against each other inside
+            // `next_work` — putting them as ordered arms here would let a
+            // continuously-changing remote starve local uploads without bound.
             biased;
             () = &mut shutdown => return Ok(summary),
-            event = events.recv() => match event {
-                Some(event) => {
-                    pull(reconciler, cursor, event).await;
+            () = sleep_until(retry_at), if retry_at.is_some() => {
+                retry_at = pull(reconciler, cursor, RemoteEvent::Changed, &mut backoff).await;
+                summary.pulls += 1;
+            }
+            work = next_work(&mut events, &mut batches) => match work {
+                Work::Remote(Some(event)) => {
+                    retry_at = pull(reconciler, cursor, event, &mut backoff).await;
                     summary.pulls += 1;
                 }
-                // The long-poll loop only stops when it is dropped, so this
-                // means the remote half is gone for good.
-                None => return Ok(summary),
-            },
-            batch = batches.recv() => match batch {
-                Some(batch) => {
+                Work::Local(Some(batch)) => {
                     push(reconciler, &batch).await;
                     summary.pushes += 1;
                 }
-                None => return Ok(summary),
+                // The long-poll loop only stops when it is dropped, and the
+                // watcher likewise, so a closed channel means that half is
+                // gone for good.
+                Work::Remote(None) | Work::Local(None) => return Ok(summary),
             },
         }
+    }
+}
+
+/// One unit of work from either direction.
+enum Work {
+    Remote(Option<RemoteEvent>),
+    Local(Option<Vec<PathBuf>>),
+}
+
+/// Race the two work channels without an ordering bias, so neither direction
+/// can starve the other however busy it is.
+async fn next_work(
+    events: &mut mpsc::Receiver<RemoteEvent>,
+    batches: &mut mpsc::Receiver<Vec<PathBuf>>,
+) -> Work {
+    tokio::select! {
+        event = events.recv() => Work::Remote(event),
+        batch = batches.recv() => Work::Local(batch),
+    }
+}
+
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        // Never resolves; the `if` guard on the select arm keeps us out of here.
+        None => std::future::pending().await,
     }
 }
 
 /// Answer one remote nudge, then hand the new cursor back to the long-poll loop.
 ///
 /// A failed pull is logged rather than fatal: the cursor was not advanced past
-/// anything unapplied, so the next notification retries the same work.
+/// anything unapplied. Returns when to retry — the next notification would
+/// also retry the work, but a quiet remote may never send one.
 async fn pull<S: RemoteSource + RemoteSink + Sync>(
     reconciler: &mut Reconciler<S>,
     cursor: &CursorHandle,
     event: RemoteEvent,
-) {
+    backoff: &mut Backoff,
+) -> Option<tokio::time::Instant> {
     if event == RemoteEvent::CursorReset {
         tracing::info!("cursor reset; rebuilding from a full listing");
     }
-    match reconciler.pull().await {
-        Ok(pull) => tracing::info!(
-            applied = pull.applied,
-            resynced = pull.resynced,
-            "applied remote changes"
-        ),
-        Err(error) => tracing::warn!(%error, "pull failed; will retry on the next notification"),
-    }
+    let retry_at = match reconciler.pull().await {
+        Ok(pull) => {
+            tracing::info!(
+                applied = pull.applied,
+                resynced = pull.resynced,
+                "applied remote changes"
+            );
+            backoff.reset();
+            None
+        }
+        Err(error) => {
+            let delay = backoff.next_delay();
+            tracing::warn!(%error, retry_in = ?delay, "pull failed; will retry");
+            Some(tokio::time::Instant::now() + delay)
+        }
+    };
     // Published even after a failure: a partial pull still advanced the cursor
     // page by page, and the loop must not park on the one we started from.
     if let Some(fresh) = reconciler.cursor() {
         cursor.publish(fresh);
     }
+    retry_at
 }
 
 /// Upload one settled batch of local paths.
@@ -222,6 +268,39 @@ mod tests {
         .unwrap();
 
         assert_eq!(summary.pushes, 1);
+    }
+
+    /// A pull that fails on a transient error is retried on a timer: the nudge
+    /// that triggered it is consumed, and a remote that then goes quiet would
+    /// otherwise leave the account unsynced indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_pull_is_retried_on_a_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = FakeRemote::new();
+        remote.put("/a.txt", b"hello");
+        // A Config error pierces the listing layer's own transient-retry loop,
+        // so it reaches the sync loop as a failed pull.
+        remote.queue_listing(Err(crate::error::Error::Config("boom".into())));
+        remote.queue_listing(Ok(page("cursor-2", vec![file("/a.txt", "r1")])));
+        let mut reconciler = reconciler(remote, dir.path());
+
+        let (events_tx, events) = mpsc::channel(1);
+        let (_batches_tx, batches) = mpsc::channel::<Vec<PathBuf>>(1);
+        events_tx.send(RemoteEvent::Changed).await.unwrap();
+
+        let summary = run(
+            &mut reconciler,
+            &cursor_handle(),
+            events,
+            batches,
+            tokio::time::sleep(Duration::from_secs(300)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.pulls, 2, "the failure must be retried unprompted");
+        assert_eq!(reconciler.cursor(), Some("cursor-2"));
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"hello");
     }
 
     /// Shutdown wins over pending work, so a busy directory cannot keep the
