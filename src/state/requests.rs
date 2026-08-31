@@ -84,23 +84,12 @@ impl RetryQueue {
     /// once, and a daemon that is not running simply leaves the queue for
     /// whenever it next starts.
     pub fn take(&self) -> Result<Vec<RetryRequest>> {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(source) => {
-                return Err(Error::ReadFile {
-                    path: self.path.clone(),
-                    source,
-                });
-            }
+        let Some(text) = crate::fsutil::read_optional(&self.path)? else {
+            return Ok(Vec::new());
         };
         // Removed before the lines are handed out: a malformed line must not
         // leave the queue in place to be re-read on every pass forever.
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        crate::fsutil::remove_if_present(&self.path)?;
         Ok(text.lines().filter_map(parse_line).collect())
     }
 }

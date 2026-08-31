@@ -5,12 +5,12 @@
 //! container, `compose.yaml` mounts a named volume at that path so it survives
 //! rebuilds and never lands in the image.
 
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::fsutil;
 
 /// Owner read/write only. The refresh token is a bearer credential.
 const TOKEN_FILE_MODE: u32 = 0o600;
@@ -38,9 +38,7 @@ impl TokenStore {
 
     /// The default location: `$XDG_DATA_HOME/dbsync/credentials.json`.
     pub fn default_location() -> Result<Self> {
-        let dirs = directories::ProjectDirs::from("", "", "dbsync")
-            .ok_or_else(|| Error::Config("cannot determine a home directory".into()))?;
-        Ok(Self::at(dirs.data_dir().join("credentials.json")))
+        Ok(Self::at(fsutil::data_dir()?.join("credentials.json")))
     }
 
     /// Where this store reads and writes.
@@ -50,17 +48,8 @@ impl TokenStore {
 
     /// Load stored credentials, or [`Error::NotAuthenticated`] if absent.
     pub fn load(&self) -> Result<StoredCredentials> {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Error::NotAuthenticated);
-            }
-            Err(source) => {
-                return Err(Error::ReadFile {
-                    path: self.path.clone(),
-                    source,
-                });
-            }
+        let Some(text) = fsutil::read_optional(&self.path)? else {
+            return Err(Error::NotAuthenticated);
         };
         serde_json::from_str(&text)
             .map_err(|e| Error::Config(format!("{}: {e}", self.path.display())))
@@ -69,29 +58,12 @@ impl TokenStore {
     /// Write credentials with owner-only permissions, replacing any existing
     /// file atomically so a crash cannot leave a truncated token behind.
     pub fn save(&self, credentials: &StoredCredentials) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-        }
-        let temp = self.path.with_extension("tmp");
-        let json = serde_json::to_string_pretty(credentials)
-            .map_err(|e| Error::Config(format!("cannot serialise credentials: {e}")))?;
-
-        // Create with the restrictive mode from the start: writing first and
-        // chmod-ing after would leave the token world-readable in between.
-        {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(TOKEN_FILE_MODE)
-                .open(&temp)?;
-            file.write_all(json.as_bytes())?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&temp, &self.path)?;
-        Ok(())
+        fsutil::write_json_atomically(
+            &self.path,
+            credentials,
+            "credentials",
+            Some(TOKEN_FILE_MODE),
+        )
     }
 
     /// True when credentials are present.
@@ -102,6 +74,8 @@ impl TokenStore {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     fn store() -> (tempfile::TempDir, TokenStore) {

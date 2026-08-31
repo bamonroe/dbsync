@@ -416,6 +416,7 @@ implementation yet.
 | `src/config.rs` | Load and validate `config.toml` | done |
 | `src/error.rs` | Crate-wide `Error`/`Result` | done |
 | `src/blocking.rs` | Running blocking disk work off the runtime's worker threads | done |
+| `src/fsutil.rs` | Shared file helpers: data dir, optional read/remove, atomic write | done |
 | `src/notify/longpoll.rs` | The long-poll call: cursor in, outcome out | done |
 | `src/notify/backoff.rs` | Capped exponential retry curve for failed polls | done |
 | `src/notify/watch.rs` | The driving loop: holds the cursor, reconnects, emits `RemoteEvent` | done |

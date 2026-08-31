@@ -130,18 +130,9 @@ impl Journal {
 
     /// Every record that survived, in order, stopping at the first torn one.
     pub fn replay(&self) -> Result<Vec<Record>> {
-        let file = match std::fs::File::open(&self.path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.count.store(0, Ordering::Relaxed);
-                return Ok(Vec::new());
-            }
-            Err(source) => {
-                return Err(Error::ReadFile {
-                    path: self.path.clone(),
-                    source,
-                });
-            }
+        let Some(file) = crate::fsutil::open_optional(&self.path)? else {
+            self.count.store(0, Ordering::Relaxed);
+            return Ok(Vec::new());
         };
         let mut records = Vec::new();
         for line in BufReader::new(file).lines() {
@@ -171,17 +162,9 @@ impl Journal {
 
     /// Drop the journal, which a fresh snapshot has just made redundant.
     pub fn clear(&self) -> Result<()> {
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => {
-                self.count.store(0, Ordering::Relaxed);
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.count.store(0, Ordering::Relaxed);
-                Ok(())
-            }
-            Err(error) => Err(error.into()),
-        }
+        crate::fsutil::remove_if_present(&self.path)?;
+        self.count.store(0, Ordering::Relaxed);
+        Ok(())
     }
 }
 

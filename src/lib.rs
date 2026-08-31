@@ -13,6 +13,7 @@ pub mod blocking;
 pub mod config;
 pub mod daemon;
 pub mod error;
+pub mod fsutil;
 pub mod notify;
 pub mod reconcile;
 pub mod state;

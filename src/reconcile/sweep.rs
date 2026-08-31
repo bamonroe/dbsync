@@ -6,7 +6,7 @@
 //! watcher filters partials out, and sync never sees them. They just
 //! accumulate, invisible, one per interrupted download.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::Result;
 
@@ -60,15 +60,16 @@ fn sweep_tree(root: &Path) -> Result<usize> {
 /// exactly the interrupted large download that resume exists for, and sweeping
 /// it would restart a many-gigabyte fetch from byte zero on every daemon
 /// restart. The map is trusted, not the length — see [`crate::api::download`].
-fn remove_if_partial(path: &PathBuf) -> usize {
+fn remove_if_partial(path: &Path) -> usize {
     if !crate::api::is_partial(path) || crate::api::is_resumable_partial(path) {
         return 0;
     }
-    match std::fs::remove_file(path) {
-        Ok(()) => {
+    match crate::fsutil::remove_if_present(path) {
+        Ok(true) => {
             tracing::debug!(path = %path.display(), "removed leftover partial download");
             1
         }
+        Ok(false) => 0,
         Err(error) => {
             tracing::warn!(path = %path.display(), %error, "could not remove partial download");
             0

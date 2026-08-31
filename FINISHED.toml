@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "extract-shared-fsutil-helpers-for-repeated-file-i-o-boilerplate"
+title = "Extract shared fsutil helpers for repeated file I/O boilerplate"
+description = "Four repeated patterns: atomic write-temp-sync-rename (state/db.rs:412-432 vs auth/store.rs:71-95 — atomic_write_json with optional mode); ProjectDirs default_location boilerplate (db.rs:313-317 vs store.rs:40-44 — shared data_dir()); read_to_string with NotFound-as-default (db.rs:344, store.rs:52, state/requests.rs:86, state/journal.rs:110 — read_optional()); remove-ignoring-NotFound (journal.rs:139, requests.rs:99, reconcile/sweep.rs:51 — remove_if_present()). Put them in one small fsutil module."
+status = "finished"
+level = "task"
+category = "refactor"
+created = 2026-08-30
+completed = 2026-08-31
+tags = ["review", "dedup"]
+
+[[task]]
 id = "buffer-download-writes-and-keep-the-partial-file-open-across-chunks"
 title = "Buffer download writes and keep the partial file open across chunks"
 description = "src/api/download.rs:263-267 (stream_to) and src/api/partial.rs:87-92 write each ~8-16 KB network frame straight to tokio::fs::File — wrap in BufWriter::with_capacity(256KiB) and flush before sync_all (~16x fewer dispatches). Also partial.rs:77-84 re-opens the file per chunk (up to 64 opens x retries); keep one open handle and use positional writes (FileExt::write_all_at), which also removes the shared-cursor hazard noted at line 26."

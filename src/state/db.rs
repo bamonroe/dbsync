@@ -319,9 +319,7 @@ impl StateDb {
     /// The default location: `$XDG_DATA_HOME/dbsync/state.json`, alongside the
     /// credentials.
     pub fn default_location() -> Result<Self> {
-        let dirs = directories::ProjectDirs::from("", "", "dbsync")
-            .ok_or_else(|| Error::Config("cannot determine a home directory".into()))?;
-        Ok(Self::at(dirs.data_dir().join("state.json")))
+        Ok(Self::at(crate::fsutil::data_dir()?.join("state.json")))
     }
 
     pub fn path(&self) -> &Path {
@@ -359,15 +357,8 @@ impl StateDb {
 
     /// Load the snapshot alone, ignoring the journal.
     fn load_snapshot(&self) -> Result<SyncState> {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(SyncState::new()),
-            Err(source) => {
-                return Err(Error::ReadFile {
-                    path: self.path.clone(),
-                    source,
-                });
-            }
+        let Some(text) = crate::fsutil::read_optional(&self.path)? else {
+            return Ok(SyncState::new());
         };
         let state: SyncState = serde_json::from_str(&text)
             .map_err(|e| Error::Config(format!("{}: {e}", self.path.display())))?;
@@ -462,30 +453,9 @@ impl StateDb {
     }
 
     /// Write the state so that a crash leaves either the old file or the new
-    /// one, never a partial one.
-    ///
-    /// The file is synced before the rename so its bytes are durable, and the
-    /// directory is synced after so the rename itself survives power loss.
+    /// one, never a partial one. See [`crate::fsutil::write_json_atomically`].
     fn write_snapshot(&self, state: &SyncState) -> Result<()> {
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| Error::Config("state path has no parent directory".into()))?;
-        std::fs::create_dir_all(parent)?;
-
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|e| Error::Config(format!("cannot serialise sync state: {e}")))?;
-
-        let temp = self.path.with_extension("tmp");
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&temp)?;
-            file.write_all(json.as_bytes())?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&temp, &self.path)?;
-        std::fs::File::open(parent)?.sync_all()?;
-        Ok(())
+        crate::fsutil::write_json_atomically(&self.path, state, "sync state", None)
     }
 }
 
