@@ -5,6 +5,7 @@
 //! [`crate::Error`] and one place that retries a call after refreshing an
 //! expired token.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -60,26 +61,34 @@ impl ApiClient {
         self.chunking
     }
 
-    /// POST a JSON body to an RPC endpoint and decode the JSON reply.
+    /// Run `send` with the cached access token, and once more with a freshly
+    /// refreshed one if Dropbox rejected the first attempt.
     ///
-    /// Retries once on a rejected token, since the usual cause is an access
-    /// token that expired between the cache check and the request.
+    /// Every authenticated call goes through here, so the refresh-and-retry
+    /// rule lives in exactly one place. The usual cause of a 401 is an access
+    /// token that expired between the cache check and the request, so one retry
+    /// is enough: a second rejection is a real authentication failure.
+    async fn with_fresh_token<Send, Fut, T>(&self, mut send: Send) -> Result<T>
+    where
+        Send: FnMut(String) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        match send(self.tokens.access_token().await?).await {
+            Err(Error::Unauthorized) => send(self.tokens.force_refresh().await?).await,
+            other => other,
+        }
+    }
+
+    /// POST a JSON body to an RPC endpoint and decode the JSON reply.
     pub(super) async fn rpc<Req, Res>(&self, endpoint: &str, body: &Req) -> Result<Res>
     where
         Req: Serialize,
         Res: DeserializeOwned,
     {
         let url = format!("{RPC_HOST}/{endpoint}");
-        let response = match self
-            .send_rpc(&url, body, self.tokens.access_token().await?)
-            .await
-        {
-            Err(Error::Unauthorized) => {
-                let token = self.tokens.force_refresh().await?;
-                self.send_rpc(&url, body, token).await?
-            }
-            other => other?,
-        };
+        let response = self
+            .with_fresh_token(|token| self.send_rpc(&url, body, token))
+            .await?;
         Ok(response.json().await?)
     }
 
@@ -113,16 +122,9 @@ impl ApiClient {
     ) -> Result<reqwest::Response> {
         let url = format!("{CONTENT_HOST}/{endpoint}");
         let arg = serde_json::to_string(arg).map_err(|error| Error::Config(error.to_string()))?;
-        let response = match self
-            .send_download(&url, &arg, self.tokens.access_token().await?, range)
-            .await
-        {
-            Err(Error::Unauthorized) => {
-                let token = self.tokens.force_refresh().await?;
-                self.send_download(&url, &arg, token, range).await
-            }
-            other => other,
-        }?;
+        let response = self
+            .with_fresh_token(|token| self.send_download(&url, &arg, token, range))
+            .await?;
         range.verify(&response)?;
         Ok(response)
     }
@@ -143,14 +145,8 @@ impl ApiClient {
     ) -> Result<reqwest::Response> {
         let url = format!("{CONTENT_HOST}/{endpoint}");
         let arg = serde_json::to_string(arg).map_err(|error| Error::Config(error.to_string()))?;
-        let token = self.tokens.access_token().await?;
-        match self.send_upload(&url, &arg, body.clone(), token).await {
-            Err(Error::Unauthorized) => {
-                let token = self.tokens.force_refresh().await?;
-                self.send_upload(&url, &arg, body, token).await
-            }
-            other => other,
-        }
+        self.with_fresh_token(|token| self.send_upload(&url, &arg, body.clone(), token))
+            .await
     }
 
     async fn send_upload(
