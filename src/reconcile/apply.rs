@@ -14,9 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::api::{Allowance, RemoteEntry, RemoteFile, staged_path};
 use crate::error::{Error, Result};
-use crate::state::{
-    SyncEntry, SyncState, entry_for_local_file, entry_for_local_file_off_thread, key_for,
-};
+use crate::state::{SyncEntry, SyncState, entry_for_local_file, entry_for_local_file_off_thread};
 
 use super::conflict;
 use super::dircase;
@@ -250,7 +248,9 @@ pub(crate) fn record(state: &mut SyncState, plan: &Plan<'_>, fetched: Fetched) -
             };
             state.insert(entry);
         }
-        Action::Delete { display_path } => forget_subtree(state, display_path),
+        Action::Delete { display_path } => {
+            state.remove_subtree(display_path);
+        }
         Action::Directory { canonical } => state.record_folder_case(canonical),
         Action::Skip => {}
     }
@@ -321,23 +321,6 @@ async fn remove_local(local: &Path) -> Result<Applied> {
             }
             Ok(Applied::Deleted)
         }
-    }
-}
-
-/// Drop the path and every descendant from the state.
-///
-/// A tombstone for a folder is the only notice we get that its contents are
-/// gone too; Dropbox does not send one tombstone per child.
-fn forget_subtree(state: &mut SyncState, display_path: &str) {
-    let key = key_for(display_path);
-    let prefix = format!("{key}/");
-    let doomed: Vec<String> = state
-        .entries()
-        .map(|entry| key_for(&entry.display_path))
-        .filter(|candidate| *candidate == key || candidate.starts_with(&prefix))
-        .collect();
-    for path in doomed {
-        state.remove(&path);
     }
 }
 

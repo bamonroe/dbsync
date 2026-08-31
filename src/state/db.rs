@@ -144,6 +144,32 @@ impl SyncState {
         removed
     }
 
+    /// Forget `path` and everything beneath it, returning how many entries
+    /// went. A tombstone for a folder is the only notice we get that its
+    /// contents are gone too; Dropbox does not send one per child.
+    ///
+    /// The keys are lowercased and sorted, so the descendants are exactly the
+    /// run that starts with `path/` — seek to it rather than walking every
+    /// entry in the account. The path itself sorts *before* that run and is
+    /// removed separately, since names like `a/b.txt` fall between `a/b` and
+    /// `a/b/` and would otherwise end the run early.
+    pub fn remove_subtree(&mut self, path: &str) -> usize {
+        let key = key_for(path);
+        let prefix = format!("{key}/");
+        let mut doomed: Vec<String> = self
+            .entries
+            .range(prefix.clone()..)
+            .map(|(candidate, _)| candidate)
+            .take_while(|candidate| candidate.starts_with(&prefix))
+            .cloned()
+            .collect();
+        doomed.push(key);
+        doomed
+            .iter()
+            .filter(|doomed| self.remove(doomed).is_some())
+            .count()
+    }
+
     /// Every known entry, in stable key order.
     pub fn entries(&self) -> impl Iterator<Item = &SyncEntry> {
         self.entries.values()
@@ -477,6 +503,39 @@ mod tests {
             size: 7,
             display_path: path.into(),
         }
+    }
+
+    /// A folder tombstone takes its whole subtree with it, matched
+    /// case-insensitively — and nothing that merely shares the name's prefix.
+    #[test]
+    fn removing_a_subtree_takes_the_descendants_and_nothing_else() {
+        let mut state = SyncState::new();
+        for path in [
+            "/Docs",
+            "/Docs/a.txt",
+            "/Docs/deep/b.txt",
+            // Sorts between "/docs" and "/docs/" — the scan must not stop here.
+            "/Docs.txt",
+            "/Docsy/c.txt",
+            "/other.txt",
+        ] {
+            state.insert(entry(path));
+        }
+
+        assert_eq!(state.remove_subtree("/docs"), 3);
+
+        let left: Vec<&str> = state.entries().map(|e| e.display_path.as_str()).collect();
+        assert_eq!(left, ["/Docs.txt", "/Docsy/c.txt", "/other.txt"]);
+    }
+
+    /// Removing a path with no descendants still removes the path.
+    #[test]
+    fn removing_a_leaf_subtree_removes_just_it() {
+        let mut state = SyncState::new();
+        state.insert(entry("/a.txt"));
+        assert_eq!(state.remove_subtree("/a.txt"), 1);
+        assert_eq!(state.remove_subtree("/gone.txt"), 0);
+        assert!(state.is_empty());
     }
 
     /// A save that fails to reach disk must leave the deltas queued, so the
