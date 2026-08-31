@@ -32,6 +32,16 @@ impl ContentHasher {
     /// Feed the next bytes of the file, in order.
     pub fn update(&mut self, mut data: &[u8]) {
         while !data.is_empty() {
+            // A whole block sitting on a block boundary can be hashed straight
+            // out of the caller's buffer. Staging it in `pending` first would
+            // be a second pass over every byte of the file, and the reader
+            // feeds exactly this shape.
+            if self.pending.is_empty() && data.len() >= BLOCK_SIZE {
+                let (block, rest) = data.split_at(BLOCK_SIZE);
+                self.block_digests.extend_from_slice(&Sha256::digest(block));
+                data = rest;
+                continue;
+            }
             let room = BLOCK_SIZE - self.pending.len();
             let take = room.min(data.len());
             self.pending.extend_from_slice(&data[..take]);
@@ -143,6 +153,23 @@ mod tests {
             hasher.update(chunk);
         }
         assert_eq!(hasher.finalize(), hash_bytes(&data));
+    }
+
+    /// Block-aligned feeds take the copy-free path; they must agree with the
+    /// staged path on the same bytes.
+    #[test]
+    fn block_aligned_chunks_match_unaligned_ones() {
+        let data = vec![0x65u8; BLOCK_SIZE * 3 + 17];
+        let mut aligned = ContentHasher::new();
+        for chunk in data.chunks(BLOCK_SIZE) {
+            aligned.update(chunk);
+        }
+        let mut staged = ContentHasher::new();
+        for chunk in data.chunks(BLOCK_SIZE - 1) {
+            staged.update(chunk);
+        }
+        assert_eq!(aligned.finalize(), hash_bytes(&data));
+        assert_eq!(staged.finalize(), hash_bytes(&data));
     }
 
     #[test]
