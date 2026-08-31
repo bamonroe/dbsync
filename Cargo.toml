@@ -10,7 +10,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+# Only ever parsed here (config load); the serializer is pulled in by the
+# drift test alone, via dev-dependencies.
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
@@ -38,3 +40,20 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 http = "1"
+# `config_drift` re-serializes a Config to enumerate its keys.
+toml = { version = "0.8", features = ["display"] }
+
+# Link-time optimization across crates; "thin" keeps the release build fast
+# enough to run routinely.
+[profile.release]
+lto = "thin"
+
+# Line tables are enough for a backtrace, and are far cheaper to emit and link
+# than full debug info.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies are compiled once and then reused, so optimizing them pays for
+# itself in test and daemon runtime without slowing the edit loop.
+[profile.dev.package."*"]
+opt-level = 2
