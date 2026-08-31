@@ -20,9 +20,19 @@ use crate::state::{SyncState, hash};
 const MARKER: &str = "conflicted copy";
 
 /// Set the current local bytes aside, and return where they went.
+///
+/// The target is *claimed* with `O_EXCL` rather than probed with `exists()`:
+/// a probe-then-copy would let two near-simultaneous conflicts on one file —
+/// or an incoming download that already carries a conflicted-copy name —
+/// truncate an earlier copy, which is exactly the bytes this exists to keep.
 pub async fn preserve(local: &Path) -> Result<PathBuf> {
-    let target = conflicted_path(local);
-    tokio::fs::copy(local, &target).await?;
+    use tokio::io::AsyncWriteExt;
+    let (target, mut file) = claim_beside(local).await?;
+    let mut source = tokio::fs::File::open(local).await?;
+    tokio::io::copy(&mut source, &mut file).await?;
+    file.flush().await?;
+    let permissions = source.metadata().await?.permissions();
+    tokio::fs::set_permissions(&target, permissions).await?;
     tracing::warn!(
         original = %local.display(),
         copy = %target.display(),
@@ -31,11 +41,42 @@ pub async fn preserve(local: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// Exclusively create the first free conflicted-copy name beside `local`.
+async fn claim_beside(local: &Path) -> Result<(PathBuf, tokio::fs::File)> {
+    for nth in 1.. {
+        let candidate = numbered(local, nth);
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+            .await
+        {
+            Ok(file) => return Ok((candidate, file)),
+            // Someone else holds this name; take the next one.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!("the loop runs until a name is free")
+}
+
 /// The first free `name (conflicted copy).ext` beside `local`.
 ///
 /// Conflicts repeat — a file edited on two machines all afternoon produces
-/// several — so the name is numbered once the plain one is taken.
+/// several — so the name is numbered once the plain one is taken. This only
+/// *names* the first free slot; [`preserve`] claims one atomically.
 pub fn conflicted_path(local: &Path) -> PathBuf {
+    let mut nth = 1;
+    let mut candidate = numbered(local, nth);
+    while candidate.exists() {
+        nth += 1;
+        candidate = numbered(local, nth);
+    }
+    candidate
+}
+
+/// The `nth` conflicted-copy name for `local`; the first is unnumbered.
+fn numbered(local: &Path, nth: u32) -> PathBuf {
     let stem = local
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -45,14 +86,10 @@ pub fn conflicted_path(local: &Path) -> PathBuf {
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
     let parent = local.parent().unwrap_or(Path::new(""));
-
-    let mut candidate = parent.join(format!("{stem} ({MARKER}){extension}"));
-    let mut nth = 1;
-    while candidate.exists() {
-        nth += 1;
-        candidate = parent.join(format!("{stem} ({MARKER} {nth}){extension}"));
+    match nth {
+        1 => parent.join(format!("{stem} ({MARKER}){extension}")),
+        _ => parent.join(format!("{stem} ({MARKER} {nth}){extension}")),
     }
-    candidate
 }
 
 /// Does the file on disk hold bytes we have never sent to Dropbox?
@@ -136,6 +173,23 @@ mod tests {
             conflicted_path(&original),
             dir.path().join("a (conflicted copy 2).txt")
         );
+    }
+
+    /// A copy already sitting at the name must never be truncated — preserve
+    /// claims the *next* free slot instead.
+    #[tokio::test]
+    async fn preserving_never_overwrites_an_existing_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("a.txt");
+        std::fs::write(&original, b"newest").unwrap();
+        let taken = dir.path().join("a (conflicted copy).txt");
+        std::fs::write(&taken, b"earlier bytes").unwrap();
+
+        let copy = preserve(&original).await.unwrap();
+
+        assert_eq!(copy, dir.path().join("a (conflicted copy 2).txt"));
+        assert_eq!(std::fs::read(&taken).unwrap(), b"earlier bytes");
+        assert_eq!(std::fs::read(&copy).unwrap(), b"newest");
     }
 
     #[tokio::test]

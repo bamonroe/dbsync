@@ -33,18 +33,6 @@ created = 2026-08-30
 tags = ["review"]
 
 [[task]]
-id = "conflicted-path-has-a-check-then-use-race-and-can-overwrite-an-earlier-conflicted-copy"
-title = "conflicted_path has a check-then-use race and can overwrite an earlier conflicted copy"
-description = "src/reconcile/conflict.rs:49-55: the while candidate.exists() probe followed later by tokio::fs::copy (which truncates) means two near-simultaneous conflicts on the same file — or an incoming download already named like a conflicted copy — can overwrite the earlier copy, the exact bytes the mechanism protects. Create the target with O_EXCL (File::create_new) and retry on collision."
-status = "active"
-level = "task"
-category = "bug"
-urgency = "low"
-order = 120
-created = 2026-08-30
-tags = ["review"]
-
-[[task]]
 id = "move-blocking-filesystem-work-off-tokio-runtime-threads"
 title = "Move blocking filesystem work off tokio runtime threads"
 description = "Blocking calls run directly in async contexts: hash_file (src/state/hash.rs:61, full-file SHA-256 with std::fs reads) is called from reconcile/conflict.rs:88,95 and reconcile/local.rs:111; Db::save (src/state/db.rs:417-430) does sync writes plus double fsync from four async call sites in reconcile/mod.rs; sweep (src/reconcile/sweep.rs:28,51) and create_dir_all (daemon/mod.rs:86) walk the tree on the runtime thread. Wrap these in spawn_blocking (or async variants). A multi-GB hash currently stalls a worker for its whole duration."
