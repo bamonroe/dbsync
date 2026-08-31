@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "buffer-download-writes-and-keep-the-partial-file-open-across-chunks"
+title = "Buffer download writes and keep the partial file open across chunks"
+description = "src/api/download.rs:263-267 (stream_to) and src/api/partial.rs:87-92 write each ~8-16 KB network frame straight to tokio::fs::File — wrap in BufWriter::with_capacity(256KiB) and flush before sync_all (~16x fewer dispatches). Also partial.rs:77-84 re-opens the file per chunk (up to 64 opens x retries); keep one open handle and use positional writes (FileExt::write_all_at), which also removes the shared-cursor hazard noted at line 26."
+status = "finished"
+level = "task"
+category = "refactor"
+created = 2026-08-30
+completed = 2026-08-31
+tags = ["review", "perf"]
+
+[[task]]
 id = "eliminate-per-chunk-8-mib-copies-on-the-upload-path"
 title = "Eliminate per-chunk 8 MiB copies on the upload path"
 description = "src/api/client.rs:135: content_upload clones the full body (up to 8 MiB per session chunk) just for the rare 401-retry path — use Bytes (cheap clone) or check token freshness first. Also src/api/upload.rs:207: read_chunk zero-fills a fresh 8 MiB Vec per chunk — use with_capacity + take().read_to_end."

@@ -161,7 +161,11 @@ Five decisions hold this together, and each exists to rule out a specific failur
 - **Chunks are a fixed size, written at their true offsets** into a preallocated (sparse)
   file. Fixed size means chunk N's offset is implied by N rather than stored, so progress
   collapses to one bit per chunk; true offsets mean the bytes are right by construction
-  whatever order they land in. Only the last chunk is short.
+  whatever order they land in. Only the last chunk is short. The writes are *positional*
+  (`write_all_at`), which is what lets every chunk share one open handle — no cursor exists
+  for a concurrent chunk to move — and each is gathered into a 256 KiB block first, so a
+  multi-megabyte chunk costs a few dozen disk dispatches rather than one per network frame.
+  The single-stream path buffers the same way.
 - **Progress is a sidecar bitmap, not a length** (`src/api/chunkmap.rs`). A length cannot
   express "chunks 0–3 and 5 landed, 4 did not". The sidecar's header carries the size, chunk
   size and count it was built for, and a mismatch discards it rather than reinterpreting bits

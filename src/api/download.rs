@@ -18,7 +18,7 @@ use serde::Serialize;
 use super::chunkmap::MAP_SUFFIX;
 use super::chunks::{Allowance, ChunkPlan};
 use super::client::ApiClient;
-use super::partial::Partial;
+use super::partial::{Partial, WRITE_BUFFER_BYTES};
 use super::range::ByteRange;
 use crate::error::{Error, Result};
 use crate::reconcile::paths::{MAX_COMPONENT_BYTES, shorten_to};
@@ -241,15 +241,23 @@ impl ApiClient {
 }
 
 /// Stream the body into `file`, returning the content hash of what went past.
+///
+/// The frames come off the socket in ~8-16 KiB pieces; writing each one
+/// straight through would spend a blocking-pool dispatch per frame. They are
+/// buffered into [`WRITE_BUFFER_BYTES`] blocks first, which is the same trade
+/// the chunked path makes.
 async fn stream_to(response: &mut reqwest::Response, file: &mut tokio::fs::File) -> Result<String> {
     use tokio::io::AsyncWriteExt;
     let mut hasher = ContentHasher::new();
+    let mut writer = tokio::io::BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
     while let Some(chunk) = response.chunk().await? {
         hasher.update(&chunk);
-        file.write_all(&chunk).await?;
+        writer.write_all(&chunk).await?;
     }
+    // The buffer's tail has to reach the file before the file reaches the disk.
+    writer.flush().await?;
     // Without this the rename could expose an empty file after a crash.
-    file.sync_all().await?;
+    writer.into_inner().sync_all().await?;
     Ok(hasher.finalize())
 }
 

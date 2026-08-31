@@ -14,21 +14,31 @@
 //! partial that the next attempt adopts rather than refetches.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::chunkmap::ChunkMap;
 use super::chunks::ChunkPlan;
 use crate::error::{Error, Result};
 
+/// How much of a body to gather before it goes to the disk.
+///
+/// Network frames arrive ~8-16 KiB at a time, and handing each one to the
+/// blocking pool on its own spends a thread dispatch on a write far smaller
+/// than the disk cares about. Gathering them into 256 KiB blocks cuts that
+/// traffic by roughly 16x for the same bytes.
+pub(super) const WRITE_BUFFER_BYTES: usize = 256 * 1024;
+
 /// A partial download in progress: the file, its plan, and what has landed.
 ///
-/// Shared by reference across concurrent chunk writes. Each write opens its
-/// **own** handle to the file rather than sharing one: two tasks sharing a
-/// handle would also share its cursor, and a seek by one would land the
-/// other's bytes at the wrong offset. Only the map is shared state, and it is
+/// Shared by reference across concurrent chunk writes, one open handle between
+/// them. Sharing a handle is only safe because nothing here uses its cursor:
+/// every write names its own absolute offset, so two chunks in flight cannot
+/// move each other's bytes. Only the map is mutable shared state, and it is
 /// held just long enough to set a bit.
 pub(super) struct Partial {
     path: PathBuf,
     plan: ChunkPlan,
+    file: Arc<std::fs::File>,
     map: tokio::sync::Mutex<ChunkMap>,
 }
 
@@ -51,6 +61,7 @@ impl Partial {
         Ok(Self {
             path: path.to_path_buf(),
             plan,
+            file: Arc::new(file.into_std().await),
             map: tokio::sync::Mutex::new(map),
         })
     }
@@ -70,18 +81,13 @@ impl Partial {
         index: u32,
         response: &mut reqwest::Response,
     ) -> Result<()> {
-        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
         let Some(expected) = self.chunk_len(index) else {
             return Ok(());
         };
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&self.path)
-            .await?;
-        file.seek(std::io::SeekFrom::Start(
+        let mut writer = ChunkWriter::new(
+            Arc::clone(&self.file),
             u64::from(index) * self.plan.chunk_size(),
-        ))
-        .await?;
+        );
 
         let mut written = 0_u64;
         while let Some(bytes) = response.chunk().await? {
@@ -89,14 +95,12 @@ impl Partial {
             if written > expected {
                 return Err(overrun(index, written, expected));
             }
-            file.write_all(&bytes).await?;
+            writer.push(&bytes).await?;
         }
         if written != expected {
             return Err(overrun(index, written, expected));
         }
-        // The bytes must be on disk before the bit that claims them is, or a
-        // crash between the two would leave the map vouching for a hole.
-        file.sync_all().await?;
+        writer.finish().await?;
         self.map.lock().await.mark(index).await
     }
 
@@ -139,6 +143,71 @@ impl Partial {
     pub(super) async fn abandon(self) {
         self.map.into_inner().discard().await;
         let _ = tokio::fs::remove_file(&self.path).await;
+    }
+}
+
+/// Gathers one chunk's body in memory and writes it out in
+/// [`WRITE_BUFFER_BYTES`] blocks at explicit offsets.
+///
+/// The positional writes are what let all the chunks share a single handle:
+/// nothing reads or moves the file's cursor, so the order the blocks go out in
+/// has no bearing on where they land.
+struct ChunkWriter {
+    file: Arc<std::fs::File>,
+    /// Where the next block belongs — the chunk's start, advanced by what has
+    /// already been written.
+    offset: u64,
+    buffer: Vec<u8>,
+}
+
+impl ChunkWriter {
+    fn new(file: Arc<std::fs::File>, offset: u64) -> Self {
+        Self {
+            file,
+            offset,
+            buffer: Vec::with_capacity(WRITE_BUFFER_BYTES),
+        }
+    }
+
+    /// Take one network frame, spilling once a full block has gathered.
+    async fn push(&mut self, bytes: &[u8]) -> Result<()> {
+        self.buffer.extend_from_slice(bytes);
+        if self.buffer.len() >= WRITE_BUFFER_BYTES {
+            self.spill().await?;
+        }
+        Ok(())
+    }
+
+    /// Write what has gathered so far at its offset.
+    ///
+    /// The emptied buffer comes back from the blocking pool rather than being
+    /// dropped there, so one allocation serves the whole chunk.
+    async fn spill(&mut self) -> Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let file = Arc::clone(&self.file);
+        let offset = self.offset;
+        let mut buffer = std::mem::take(&mut self.buffer);
+        self.offset += buffer.len() as u64;
+        self.buffer = crate::blocking::run(move || {
+            use std::os::unix::fs::FileExt;
+            file.write_all_at(&buffer, offset)?;
+            buffer.clear();
+            Ok(buffer)
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Spill the tail and put the bytes on the platter.
+    ///
+    /// The sync is not optional: the bytes must be on disk before the bit that
+    /// claims them is, or a crash between the two would leave the map vouching
+    /// for a hole.
+    async fn finish(mut self) -> Result<()> {
+        self.spill().await?;
+        crate::blocking::run(move || Ok(self.file.sync_all()?)).await
     }
 }
 
@@ -326,6 +395,38 @@ mod tests {
                 .is_err()
         );
         assert!(partial.missing().await.contains(&1));
+    }
+
+    /// A chunk bigger than one write block goes out in several pieces, and
+    /// each has to pick up where the last left off — an offset that failed to
+    /// advance would overwrite the chunk's own head with its tail.
+    #[tokio::test]
+    async fn a_chunk_spanning_several_write_blocks_lands_intact() {
+        let chunk_size = (WRITE_BUFFER_BYTES + 1_000) as u64;
+        let limits = Chunking {
+            min_size: 10,
+            chunk_size,
+            max_chunks: 16,
+            ..Chunking::default()
+        };
+        let content: Vec<u8> = (0..chunk_size * 2).map(|i| (i % 251) as u8).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin.r1.dbsync-partial");
+        let dest = dir.path().join("big.bin");
+
+        let partial = Partial::open(&path, ChunkPlan::new(content.len() as u64, limits))
+            .await
+            .unwrap();
+        // Second chunk first: its bytes must not be reachable from chunk 0's
+        // spills, whichever order the blocks go out in.
+        for index in [1, 0] {
+            let start = (index as usize) * chunk_size as usize;
+            let bytes = &content[start..start + chunk_size as usize];
+            partial.write_chunk(index, &mut body(bytes)).await.unwrap();
+        }
+
+        partial.finish(&dest).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), content);
     }
 
     /// The last chunk is short by design; holding it to the nominal length
