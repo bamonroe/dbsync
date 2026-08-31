@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "set-connect-request-timeouts-on-the-api-client"
+title = "Set connect/request timeouts on the API client"
+description = "src/api/client.rs:37: reqwest::Client::builder().build() sets no timeouts, and the daemon serializes all sync through one loop, so a single hung request stalls everything indefinitely. Add connect_timeout and per-request timeouts on the RPC path (long-poll manages its own), plus one test pinning the behavior — no existing HTTP test covers a stall."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-30
+completed = 2026-08-30
+tags = ["review"]
+
+[[task]]
 id = "watcher-filter-misses-state-journal-causing-a-self-feeding-sync-loop"
 title = "Watcher filter misses state.journal, causing a self-feeding sync loop"
 description = "src/watcher/mod.rs:110-114: is_state_file matches only names starting state.json, but StateDb also writes state.journal (journal.rs:71). With the state db inside the synced folder, every save triggers a watcher event, a push, another save, another journal write — an endless upload loop. Also the name-only filter means any user file named state.json* anywhere is silently never synced. Filter by the actual configured state-db paths instead of names."

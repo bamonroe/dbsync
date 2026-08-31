@@ -34,7 +34,15 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn new(tokens: Arc<TokenProvider>) -> Result<Self> {
         Ok(Self {
-            http: reqwest::Client::builder().build()?,
+            // The daemon serialises all syncing through one loop, so a single
+            // request hung on a dead connection would stall every transfer in
+            // both directions. No whole-request timeout, though: a large
+            // download legitimately takes as long as it takes, and the
+            // per-read timeout already catches the stalled cases.
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .read_timeout(std::time::Duration::from_secs(60))
+                .build()?,
             tokens,
             chunking: Chunking::default(),
         })
