@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "small-state-hash-perf-cleanups"
-title = "Small state/hash perf cleanups"
-description = "Three small wins: (1) src/state/hash.rs:38-48 — ContentHasher::update copies every 4 MiB block into pending before hashing; hash aligned full blocks directly to skip a full memcpy pass over all hashed bytes. (2) src/reconcile/apply.rs:275-282 — forget_subtree scans all entries with a to_lowercase alloc each even though the BTreeMap keys are already lowercased; use range() on the sorted keys. (3) src/state/db.rs:431 — snapshots use to_string_pretty, roughly doubling compaction write size; use to_string. Optionally also reuse an open handle/buffer in chunkmap.rs:180-190 mark()."
-status = "active"
-level = "task"
-category = "refactor"
-urgency = "low"
-order = 210
-created = 2026-08-30
-tags = ["review", "perf"]
-
-[[task]]
 id = "trim-cargo-toml-for-faster-builds"
 title = "Trim Cargo.toml for faster builds"
 description = "No [profile] section: add profile.release lto=\"thin\", profile.dev debug=\"line-tables-only\", and optionally profile.dev.package.\"*\" opt-level=2. Also toml = \"0.8\" pulls toml_edit via default features though dbsync only reads config — use default-features = false, features = [\"parse\"]."
