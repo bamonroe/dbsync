@@ -423,12 +423,37 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
         let mut removed = 0;
         for path in vanished {
             let local = self.paths.to_local(&path)?;
-            match tokio::fs::remove_file(&local).await {
-                Ok(()) => removed += 1,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+            // A never-uploaded local edit must not be destroyed by a remote
+            // delete. Keep the bytes and forget the entry: the next local scan
+            // sees an untracked file and uploads it, same as the download path
+            // preserving a diverged file.
+            if conflict::has_local_edit(&self.state, &path, &local, None)? {
+                tracing::warn!(
+                    path = %local.display(),
+                    "deleted remotely but edited locally; keeping the local version"
+                );
+                self.state.remove(&path);
+                continue;
             }
-            self.state.remove(&path);
+            match tokio::fs::remove_file(&local).await {
+                Ok(()) => {
+                    removed += 1;
+                    self.state.remove(&path);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.state.remove(&path);
+                }
+                // One stubborn path must not abort the pass: the cursor has
+                // already advanced, so nothing would ever revisit the rest.
+                // Keeping the entry and the failure means the next resync
+                // tries this one again.
+                Err(error) => {
+                    let error = Error::from(error);
+                    tracing::warn!(path = %local.display(), %error, "could not remove a vanished file");
+                    self.state
+                        .record_failure(&path, &error, Direction::Download);
+                }
+            }
         }
         Ok(removed)
     }
@@ -853,6 +878,62 @@ mod tests {
 
         assert!(fixture.local("a.txt").exists());
         assert!(!fixture.local("b.txt").exists());
+        assert!(fixture.applier.state().get("/b.txt").is_none());
+    }
+
+    /// A file edited locally while the daemon was down, and deleted remotely in
+    /// the meantime, holds bytes Dropbox has never seen — a resync must keep
+    /// them rather than deleting the file.
+    #[tokio::test]
+    async fn a_re_list_keeps_a_locally_edited_file_the_remote_deleted() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/a.txt", b"original");
+        fixture
+            .remote()
+            .queue_continue(page(vec![file("/a.txt", "r1")], "c1", false));
+        fixture.applier.pull().await.unwrap();
+
+        std::fs::write(fixture.local("a.txt"), b"a never-uploaded local edit").unwrap();
+        fixture.remote().queue_continue(Err(Error::CursorReset));
+        fixture
+            .remote()
+            .queue_listing(page(vec![], "fresh", false));
+        fixture.applier.pull().await.unwrap();
+
+        assert_eq!(
+            std::fs::read(fixture.local("a.txt")).unwrap(),
+            b"a never-uploaded local edit"
+        );
+        // Untracked now, so the next local scan uploads it back.
+        assert!(fixture.applier.state().get("/a.txt").is_none());
+    }
+
+    /// One path that cannot be removed must not abort the pass: the cursor has
+    /// already advanced, so the rest would otherwise never be revisited.
+    #[tokio::test]
+    async fn one_stubborn_vanished_path_does_not_abort_the_rest() {
+        let mut fixture = Fixture::new(Some("c0"));
+        fixture.remote().put("/a.txt", b"a");
+        fixture.remote().put("/b.txt", b"b");
+        fixture.remote().queue_continue(page(
+            vec![file("/a.txt", "r1"), file("/b.txt", "r1")],
+            "c1",
+            false,
+        ));
+        fixture.applier.pull().await.unwrap();
+
+        // Turn a.txt into a non-empty directory so remove_file fails on it.
+        std::fs::remove_file(fixture.local("a.txt")).unwrap();
+        std::fs::create_dir(fixture.local("a.txt")).unwrap();
+        std::fs::write(fixture.local("a.txt").join("inner"), b"x").unwrap();
+
+        fixture.remote().queue_continue(Err(Error::CursorReset));
+        fixture
+            .remote()
+            .queue_listing(page(vec![], "fresh", false));
+        fixture.applier.pull().await.unwrap();
+
+        assert!(!fixture.local("b.txt").exists(), "b must still be dropped");
         assert!(fixture.applier.state().get("/b.txt").is_none());
     }
 

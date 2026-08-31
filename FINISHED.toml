@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "drop-vanished-must-preserve-locally-edited-files"
+title = "drop_vanished must preserve locally-edited files"
+description = "src/reconcile/mod.rs:416-434: on resync, any tracked path absent from the full listing is remove_file'd unconditionally — a never-uploaded local edit is destroyed. The download path preserves diverged files via conflict::preserve; apply the same divergence check here. Also (mod.rs:426-429) one failed delete (e.g. EISDIR) aborts the whole pass after the cursor was already persisted, leaving the remaining vanished files permanently undeleted — record failures and continue instead."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-30
+completed = 2026-08-30
+tags = ["review"]
+
+[[task]]
 id = "guard-against-local-edits-landing-during-a-download"
 title = "Guard against local edits landing during a download"
 description = "src/reconcile/apply.rs:127,149-167,193: has_local_edit runs in decide(), but a long chunked download then ends with a rename over dest — a user edit in that window is clobbered with no conflicted copy. Also record() hashes the file after the rename, so an edit between rename and record is stamped as the remote rev and never uploaded. Re-check divergence just before the rename, and hash the downloaded temp file (or use the known content hash) rather than the renamed dest."

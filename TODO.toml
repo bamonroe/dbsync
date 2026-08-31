@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "drop-vanished-must-preserve-locally-edited-files"
-title = "drop_vanished must preserve locally-edited files"
-description = "src/reconcile/mod.rs:416-434: on resync, any tracked path absent from the full listing is remove_file'd unconditionally — a never-uploaded local edit is destroyed. The download path preserves diverged files via conflict::preserve; apply the same divergence check here. Also (mod.rs:426-429) one failed delete (e.g. EISDIR) aborts the whole pass after the cursor was already persisted, leaving the remaining vanished files permanently undeleted — record failures and continue instead."
-status = "active"
-level = "task"
-category = "bug"
-urgency = "high"
-order = 40
-created = 2026-08-30
-tags = ["review"]
-
-[[task]]
 id = "whole-file-download-resume-can-splice-zero-filled-tail-after-a-crash"
 title = "Whole-file download resume can splice zero-filled tail after a crash"
 description = "src/api/download.rs:81-113,245-250: the single-stream path never fsyncs until the body ends, so after power loss the partial's length can exceed its durable content (ext4 zero-fills); the next attempt resumes at existing_len and appends, producing a corrupt middle that gets renamed into place and recorded as correct. Fsync periodically like the chunked path does, or verify the content hash before rename (see the verify-download task)."
