@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "watcher-filter-misses-state-journal-causing-a-self-feeding-sync-loop"
-title = "Watcher filter misses state.journal, causing a self-feeding sync loop"
-description = "src/watcher/mod.rs:110-114: is_state_file matches only names starting state.json, but StateDb also writes state.journal (journal.rs:71). With the state db inside the synced folder, every save triggers a watcher event, a push, another save, another journal write — an endless upload loop. Also the name-only filter means any user file named state.json* anywhere is silently never synced. Filter by the actual configured state-db paths instead of names."
-status = "active"
-level = "task"
-category = "bug"
-urgency = "high"
-order = 60
-created = 2026-08-30
-tags = ["review"]
-
-[[task]]
 id = "retry-a-failed-pull-on-a-timer-not-only-on-the-next-remote-change"
 title = "Retry a failed pull on a timer, not only on the next remote change"
 description = "src/daemon/sync.rs:89-95: a failed pull is only logged and the nudge is consumed; if the remote then goes quiet, the account stays unsynced indefinitely. Add a backoff timer that re-nudges after a transient pull failure."

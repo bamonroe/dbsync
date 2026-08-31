@@ -34,7 +34,15 @@ pub struct LocalWatcher {
 }
 
 /// Watch `root` recursively, emitting batches of paths quiet for `quiet`.
-pub fn watch(root: &Path, quiet: Duration) -> Result<(LocalWatcher, mpsc::Receiver<LocalBatch>)> {
+///
+/// `state_db` is the state snapshot's path, when it lives where the watcher
+/// can see it: everything the database writes is filtered out by location
+/// rather than by a hard-coded name.
+pub fn watch(
+    root: &Path,
+    quiet: Duration,
+    state_db: Option<&Path>,
+) -> Result<(LocalWatcher, mpsc::Receiver<LocalBatch>)> {
     // Unbounded, because the inotify callback is synchronous and must never
     // block the watcher thread; the debouncer downstream is what limits work.
     let (raw_tx, raw_rx) = mpsc::unbounded_channel();
@@ -48,7 +56,12 @@ pub fn watch(root: &Path, quiet: Duration) -> Result<(LocalWatcher, mpsc::Receiv
         .map_err(watch_error)?;
 
     let (batches_tx, batches_rx) = mpsc::channel(1);
-    tokio::spawn(batch(raw_rx, batches_tx, quiet));
+    tokio::spawn(batch(
+        raw_rx,
+        batches_tx,
+        quiet,
+        StateFilter::for_db(state_db),
+    ));
     Ok((LocalWatcher { _inner: inner }, batches_rx))
 }
 
@@ -59,6 +72,7 @@ async fn batch(
     mut raw: mpsc::UnboundedReceiver<RawEvent>,
     batches: mpsc::Sender<LocalBatch>,
     quiet: Duration,
+    state: Option<StateFilter>,
 ) {
     let mut debouncer = Debouncer::new(quiet);
     loop {
@@ -67,7 +81,7 @@ async fn batch(
         let deadline = debouncer.next_deadline();
         tokio::select! {
             event = raw.recv() => match event {
-                Some(event) => note(&mut debouncer, event),
+                Some(event) => note(&mut debouncer, event, state.as_ref()),
                 None => return,
             },
             () = sleep_until(deadline), if deadline.is_some() => {
@@ -88,11 +102,15 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-fn note(debouncer: &mut Debouncer, event: RawEvent) {
+fn note(debouncer: &mut Debouncer, event: RawEvent, state: Option<&StateFilter>) {
     let now = tokio::time::Instant::now();
     match event {
         Ok(event) => {
-            for path in event.paths.into_iter().filter(|path| is_interesting(path)) {
+            for path in event
+                .paths
+                .into_iter()
+                .filter(|path| is_interesting(path, state))
+            {
                 debouncer.note(path, now);
             }
         }
@@ -103,14 +121,45 @@ fn note(debouncer: &mut Debouncer, event: RawEvent) {
 }
 
 /// Is this path a user edit we should care about?
-fn is_interesting(path: &Path) -> bool {
-    !crate::api::is_partial(path) && !is_state_file(path)
+fn is_interesting(path: &Path, state: Option<&StateFilter>) -> bool {
+    !crate::api::is_partial(path) && !state.is_some_and(|filter| filter.matches(path))
 }
 
-fn is_state_file(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("state.json"))
+/// Recognises everything the state database writes, by location rather than by
+/// a hard-coded name.
+///
+/// The database's files share its directory and its stem: `state.json` itself,
+/// the `state.tmp` a snapshot is staged through, and the `state.journal`
+/// beside it. Matching on those two facts is what keeps a journal append from
+/// feeding the watcher (a name-only filter missed it, and every save became an
+/// upload of the journal), while a *user* file that merely happens to be
+/// called `state.json` elsewhere in the tree still syncs.
+struct StateFilter {
+    dir: PathBuf,
+    stem: String,
+}
+
+impl StateFilter {
+    fn for_db(db: Option<&Path>) -> Option<Self> {
+        let db = db?;
+        Some(Self {
+            dir: db.parent()?.to_path_buf(),
+            stem: db.file_stem()?.to_str()?.to_string(),
+        })
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        if path.parent() != Some(self.dir.as_path()) {
+            return false;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        name == self.stem
+            || name
+                .strip_prefix(&self.stem)
+                .is_some_and(|rest| rest.starts_with('.'))
+    }
 }
 
 fn watch_error(error: notify_fs::Error) -> Error {
@@ -125,14 +174,33 @@ mod tests {
     /// would upload half-written files back to Dropbox.
     #[test]
     fn partial_downloads_are_ignored() {
-        assert!(!is_interesting(Path::new("/root/a.txt.dbsync-partial")));
-        assert!(is_interesting(Path::new("/root/a.txt")));
+        assert!(!is_interesting(
+            Path::new("/root/a.txt.dbsync-partial"),
+            None
+        ));
+        assert!(is_interesting(Path::new("/root/a.txt"), None));
     }
 
+    /// Everything the state database writes — snapshot, staging file, journal —
+    /// is ignored, or every save would feed the watcher and become an upload.
     #[test]
-    fn the_state_database_is_ignored() {
-        assert!(!is_interesting(Path::new("/root/state.json")));
-        assert!(!is_interesting(Path::new("/root/state.json.tmp")));
+    fn the_state_database_and_its_journal_are_ignored() {
+        let filter = StateFilter::for_db(Some(Path::new("/root/state.json")));
+        let filter = filter.as_ref();
+        assert!(!is_interesting(Path::new("/root/state.json"), filter));
+        assert!(!is_interesting(Path::new("/root/state.tmp"), filter));
+        assert!(!is_interesting(Path::new("/root/state.journal"), filter));
+    }
+
+    /// A user file that merely shares the database's name, elsewhere in the
+    /// tree — or a different name in the same directory — still syncs.
+    #[test]
+    fn user_files_near_the_state_database_still_sync() {
+        let filter = StateFilter::for_db(Some(Path::new("/root/state.json")));
+        let filter = filter.as_ref();
+        assert!(is_interesting(Path::new("/root/sub/state.json"), filter));
+        assert!(is_interesting(Path::new("/root/statement.txt"), filter));
+        assert!(is_interesting(Path::new("/root/state.json"), None));
     }
 
     /// The end-to-end shape: a write inside the watched directory turns into a
@@ -140,7 +208,7 @@ mod tests {
     #[tokio::test]
     async fn a_local_write_arrives_as_a_batch() {
         let dir = tempfile::tempdir().unwrap();
-        let (_watcher, mut batches) = watch(dir.path(), Duration::from_millis(50)).unwrap();
+        let (_watcher, mut batches) = watch(dir.path(), Duration::from_millis(50), None).unwrap();
 
         let path = dir.path().join("a.txt");
         std::fs::write(&path, b"hello").unwrap();
@@ -156,7 +224,7 @@ mod tests {
     #[tokio::test]
     async fn a_burst_of_writes_collapses() {
         let dir = tempfile::tempdir().unwrap();
-        let (_watcher, mut batches) = watch(dir.path(), Duration::from_millis(200)).unwrap();
+        let (_watcher, mut batches) = watch(dir.path(), Duration::from_millis(200), None).unwrap();
 
         let path = dir.path().join("a.txt");
         for round in 0..5 {
@@ -175,7 +243,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope");
         assert!(matches!(
-            watch(&missing, Duration::from_millis(50)),
+            watch(&missing, Duration::from_millis(50), None),
             Err(Error::Config(_))
         ));
     }

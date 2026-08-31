@@ -59,7 +59,8 @@ pub async fn run(config: &Config) -> Result<Summary> {
 
     let quiet = Duration::from_millis(config.watcher.debounce_ms);
     // Held for the lifetime of the loop: dropping it unsubscribes from inotify.
-    let (_watcher, batches) = watcher::watch(&config.local_root, quiet)?;
+    let (_watcher, batches) =
+        watcher::watch(&config.local_root, quiet, Some(reconciler.db_path()))?;
     tracing::info!(debounce_ms = config.watcher.debounce_ms, "watching locally");
 
     let summary = sync::run(

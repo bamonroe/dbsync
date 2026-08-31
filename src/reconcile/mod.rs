@@ -130,6 +130,12 @@ impl<S: RemoteSource + RemoteSink + Sync> Reconciler<S> {
         &self.state
     }
 
+    /// Where the state snapshot lives, so the watcher can ignore everything
+    /// the database writes when it sits inside the synced folder.
+    pub fn db_path(&self) -> &std::path::Path {
+        self.db.path()
+    }
+
     /// Apply everything the remote has for us.
     ///
     /// With no cursor — a first run — this is a full listing. A cursor Dropbox
