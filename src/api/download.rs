@@ -22,6 +22,7 @@ use super::partial::Partial;
 use super::range::ByteRange;
 use crate::error::{Error, Result};
 use crate::reconcile::paths::{MAX_COMPONENT_BYTES, shorten_to};
+use crate::state::hash::{ContentHasher, hash_file_off_thread};
 
 /// Suffix for the partial file a download writes before its rename.
 const PARTIAL_SUFFIX: &str = ".dbsync-partial";
@@ -57,11 +58,18 @@ impl ApiClient {
     /// into fixed chunks written at their true offsets, fetched as concurrently
     /// as the bytes it was admitted for allow, and renamed only once every
     /// chunk is present.
+    ///
+    /// `expected_hash` is the revision's Dropbox `content_hash`, when the
+    /// metadata carried one. The finished bytes are hashed and compared against
+    /// it *before* the rename, so a truncated body or a chunk that landed
+    /// wrong fails the download rather than becoming the file. Without one the
+    /// download is placed unverified — the shape checks still apply.
     pub async fn download_to(
         &self,
         remote_path: &str,
         rev: &str,
         allowance: Allowance,
+        expected_hash: Option<&str>,
         dest: &Path,
     ) -> Result<()> {
         if let Some(parent) = dest.parent() {
@@ -70,10 +78,11 @@ impl ApiClient {
         let plan = ChunkPlan::new(allowance.size, self.chunking());
         if !plan.is_whole_file() {
             return self
-                .download_chunked(remote_path, rev, allowance, plan, dest)
+                .download_chunked(remote_path, rev, allowance, plan, expected_hash, dest)
                 .await;
         }
-        self.download_whole(remote_path, rev, dest).await
+        self.download_whole(remote_path, rev, expected_hash, dest)
+            .await
     }
 
     /// The single-stream fetch: one request, written out and renamed when the
@@ -85,15 +94,30 @@ impl ApiClient {
     /// into the middle of the finished file. A file small enough for this path
     /// is cheap to refetch whole; only the chunked path resumes, because it
     /// fsyncs each chunk and gates completion on its chunk map, not on length.
-    async fn download_whole(&self, remote_path: &str, rev: &str, dest: &Path) -> Result<()> {
+    ///
+    /// The hash is accumulated as the body streams past, so verifying costs no
+    /// second pass over the file.
+    async fn download_whole(
+        &self,
+        remote_path: &str,
+        rev: &str,
+        expected_hash: Option<&str>,
+        dest: &Path,
+    ) -> Result<()> {
         let partial = partial_path(dest, rev);
         let mut response = self.request_whole(remote_path).await?;
         let mut file = tokio::fs::File::create(&partial).await?;
 
         // Stream rather than buffer: a synced folder may hold files far larger
         // than the daemon's memory budget.
-        stream_to(&mut response, &mut file).await?;
+        let hashed = stream_to(&mut response, &mut file).await?;
         drop(file);
+        if let Err(error) = verify(&partial, expected_hash, hashed) {
+            // Nothing here resumes, and the bytes are known bad — keep a doomed
+            // partial from being swept as if it were progress.
+            let _ = tokio::fs::remove_file(&partial).await;
+            return Err(error);
+        }
         tokio::fs::rename(&partial, dest).await?;
         Ok(())
     }
@@ -114,6 +138,7 @@ impl ApiClient {
         rev: &str,
         allowance: Allowance,
         plan: ChunkPlan,
+        expected_hash: Option<&str>,
         dest: &Path,
     ) -> Result<()> {
         let path = partial_path(dest, rev);
@@ -147,7 +172,7 @@ impl ApiClient {
             Err(error) => Err(error),
             // Gated on every chunk being present, never on the length: the
             // partial has been full length since the last offset was written.
-            Ok(_) => partial.finish(dest).await,
+            Ok(_) => finish_verified(partial, &path, expected_hash, dest).await,
         }
     }
 
@@ -215,14 +240,60 @@ impl ApiClient {
     }
 }
 
-async fn stream_to(response: &mut reqwest::Response, file: &mut tokio::fs::File) -> Result<()> {
+/// Stream the body into `file`, returning the content hash of what went past.
+async fn stream_to(response: &mut reqwest::Response, file: &mut tokio::fs::File) -> Result<String> {
     use tokio::io::AsyncWriteExt;
+    let mut hasher = ContentHasher::new();
     while let Some(chunk) = response.chunk().await? {
+        hasher.update(&chunk);
         file.write_all(&chunk).await?;
     }
     // Without this the rename could expose an empty file after a crash.
     file.sync_all().await?;
-    Ok(())
+    Ok(hasher.finalize())
+}
+
+/// Hash the assembled partial and rename it onto `dest` only if it is the
+/// revision Dropbox described.
+///
+/// The chunk map proves every range *arrived*; it cannot prove the bytes are
+/// right, since a chunk written from a truncated or mis-served body still sets
+/// its bit. Hashing here is the last chance to catch that — after the rename
+/// the corruption is the file, and the very next scan uploads it back.
+///
+/// A failed check abandons the partial: those bytes are known bad, so resuming
+/// into them would only reproduce the same hash.
+async fn finish_verified(
+    partial: Partial,
+    path: &Path,
+    expected_hash: Option<&str>,
+    dest: &Path,
+) -> Result<()> {
+    if expected_hash.is_some() {
+        let hashed = hash_file_off_thread(path).await?;
+        if let Err(error) = verify(path, expected_hash, hashed) {
+            tracing::warn!(%error, "chunked download did not verify; discarding");
+            partial.abandon().await;
+            return Err(error);
+        }
+    }
+    partial.finish(dest).await
+}
+
+/// Compare what we downloaded against the revision's `content_hash`.
+///
+/// Metadata without a hash — a listing shape that omits it — verifies
+/// vacuously rather than failing the transfer; the alternative is refusing to
+/// sync files Dropbox described less fully.
+fn verify(path: &Path, expected: Option<&str>, actual: String) -> Result<()> {
+    match expected {
+        Some(expected) if !expected.eq_ignore_ascii_case(&actual) => Err(Error::CorruptDownload {
+            path: path.to_path_buf(),
+            expected: expected.to_string(),
+            actual,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// The scratch path a download is written to before being renamed onto `dest`.
@@ -396,6 +467,90 @@ mod tests {
             partial.file_name().unwrap().to_str().unwrap(),
             "a.txt.r1.dbsync-partial"
         );
+    }
+
+    /// Metadata that carried no hash must still sync, so the check passes
+    /// rather than failing the transfer.
+    #[test]
+    fn a_revision_without_a_hash_verifies_vacuously() {
+        assert!(verify(Path::new("/tmp/a"), None, "abcd".into()).is_ok());
+    }
+
+    /// Dropbox writes the hash in lowercase hex, but a case difference is not
+    /// a corrupt file.
+    #[test]
+    fn a_matching_hash_verifies_whatever_its_case() {
+        assert!(verify(Path::new("/tmp/a"), Some("ABCD"), "abcd".into()).is_ok());
+    }
+
+    #[test]
+    fn a_mismatched_hash_names_both_sides() {
+        let error = verify(Path::new("/tmp/a"), Some("wanted"), "got".into()).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::CorruptDownload { expected, actual, .. } if expected == "wanted" && actual == "got"
+        ));
+    }
+
+    /// The whole point: every chunk arrived, the map says complete, and the
+    /// bytes are still not the revision's. Nothing may be renamed.
+    #[tokio::test]
+    async fn a_chunked_download_that_fails_its_hash_never_becomes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.txt");
+        let (partial, path) = complete_partial(dir.path()).await;
+
+        let error = finish_verified(partial, &path, Some("not-the-hash"), &dest)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::CorruptDownload { .. }));
+        assert!(!dest.exists(), "corrupt bytes were renamed into place");
+        assert!(!path.exists(), "the doomed partial was kept for a resume");
+    }
+
+    #[tokio::test]
+    async fn a_chunked_download_that_verifies_is_renamed_into_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.txt");
+        let (partial, path) = complete_partial(dir.path()).await;
+        let expected = crate::state::hash::hash_bytes(&CHUNKED_CONTENT);
+
+        finish_verified(partial, &path, Some(&expected), &dest)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), CHUNKED_CONTENT.to_vec());
+    }
+
+    /// 25 bytes in 10-byte chunks: three chunks, the last one short.
+    const CHUNKED_CONTENT: [u8; 25] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+    ];
+
+    /// A partial with every chunk of [`CHUNKED_CONTENT`] written into it.
+    async fn complete_partial(dir: &Path) -> (Partial, std::path::PathBuf) {
+        let limits = crate::api::chunks::Chunking {
+            min_size: 10,
+            chunk_size: 10,
+            max_chunks: 16,
+            ..Default::default()
+        };
+        let plan = ChunkPlan::new(CHUNKED_CONTENT.len() as u64, limits);
+        let path = dir.join("a.txt.r1.dbsync-partial");
+        let partial = Partial::open(&path, plan).await.unwrap();
+        for index in 0..3u32 {
+            let start = index as usize * 10;
+            let bytes = &CHUNKED_CONTENT[start..(start + 10).min(CHUNKED_CONTENT.len())];
+            let mut body = reqwest::Response::from(
+                http::Response::builder()
+                    .status(206)
+                    .body(bytes.to_vec())
+                    .unwrap(),
+            );
+            partial.write_chunk(index, &mut body).await.unwrap();
+        }
+        (partial, path)
     }
 
     #[test]

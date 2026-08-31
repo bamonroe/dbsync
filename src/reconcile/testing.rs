@@ -202,6 +202,7 @@ impl RemoteSource for FakeRemote {
         remote_path: &str,
         _rev: &str,
         allowance: Allowance,
+        _expected_hash: Option<&str>,
         dest: &Path,
     ) -> Result<()> {
         self.sizes_asked

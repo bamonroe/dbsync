@@ -190,6 +190,7 @@ pub(crate) async fn fetch<S: RemoteSource>(
                         size: file.size,
                         budgeted,
                     },
+                    file.content_hash.as_deref(),
                     &staged,
                 )
                 .await?;
@@ -367,6 +368,7 @@ mod tests {
             _remote_path: &str,
             _rev: &str,
             _allowance: Allowance,
+            _expected_hash: Option<&str>,
             dest: &Path,
         ) -> Result<()> {
             tokio::fs::write(&self.edit_path, b"typed while downloading").await?;

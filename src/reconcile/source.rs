@@ -34,11 +34,16 @@ pub trait RemoteSource {
     /// caller's budget reserved: the first plans the chunk layout, the second
     /// bounds how many of those chunks may be in flight, so per-file and
     /// across-file parallelism compose instead of multiplying.
+    ///
+    /// `expected_hash` is the revision's `content_hash` when the metadata
+    /// carried one: the transfer is checked against it before anything is
+    /// renamed into place, so corrupt bytes fail rather than land.
     fn download_to(
         &self,
         remote_path: &str,
         rev: &str,
         allowance: Allowance,
+        expected_hash: Option<&str>,
         dest: &Path,
     ) -> impl Future<Output = Result<()>> + Send;
 }
@@ -64,8 +69,9 @@ impl RemoteSource for ApiClient {
         remote_path: &str,
         rev: &str,
         allowance: Allowance,
+        expected_hash: Option<&str>,
         dest: &Path,
     ) -> impl Future<Output = Result<()>> + Send {
-        ApiClient::download_to(self, remote_path, rev, allowance, dest)
+        ApiClient::download_to(self, remote_path, rev, allowance, expected_hash, dest)
     }
 }

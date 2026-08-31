@@ -89,7 +89,9 @@ fn is_transient(error: &Error) -> bool {
         // Dropbox's own back-pressure, and its 5xx family.
         Error::RateLimited(_) => true,
         Error::Api { status, .. } => *status >= 500,
-        Error::CursorReset
+        // Not reachable from a listing call — only a transfer verifies bytes.
+        Error::CorruptDownload { .. }
+        | Error::CursorReset
         | Error::Blocking(_)
         | Error::Config(_)
         | Error::ReadFile { .. }

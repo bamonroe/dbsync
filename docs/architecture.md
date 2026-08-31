@@ -149,10 +149,10 @@ Parallelism *across* files does nothing for a single huge one. A 1 GB download i
 stream at whatever one connection gives you, however large the byte budget is. So a file at or
 above a threshold is split into fixed-size byte ranges and fetched concurrently into one
 partial (`src/api/chunks.rs` plans the split, `src/api/download.rs` drives it). Below the
-threshold nothing changes: the file arrives on one stream and resumes from the length of its
-partial, because splitting a small file four ways pays four round trips to save nothing.
+threshold nothing changes: the file arrives on one stream and is refetched whole if
+interrupted, because splitting a small file four ways pays four round trips to save nothing.
 
-Four decisions hold this together, and each exists to rule out a specific failure:
+Five decisions hold this together, and each exists to rule out a specific failure:
 
 - **Every chunk addresses `rev:<rev>`, never the display path.** That is what makes concurrent
   chunks provably one revision. Against the display path, a remote edit landing mid-download
@@ -173,6 +173,13 @@ Four decisions hold this together, and each exists to rule out a specific failur
   *last* chunk lands, so a length test would rename a file still full of holes into place. The
   sidecar is removed only after the rename succeeds, so a crash between the two leaves a
   complete partial the next attempt adopts rather than refetches.
+- **The bytes are hashed against the revision's `content_hash` before the rename**
+  (`src/api/download.rs`). Every check above proves a range *arrived*; none proves it is the
+  right bytes, since a chunk written from a truncated or mis-served body still sets its bit.
+  A mismatch abandons the partial — resuming into known-bad bytes would only reproduce the
+  same hash — and fails the download with `Error::CorruptDownload`, so the path is retried
+  from scratch rather than becoming the file. Metadata that carried no hash places the
+  download unverified, since the alternative is refusing to sync it at all.
 
 Chunk concurrency composes with the byte budget instead of multiplying with it. A file already
 holds an admission for its own bytes, and it may only spend *that* reservation on its own
@@ -309,19 +316,22 @@ them at the point of failure: `reconcile::sweep::partial_downloads` clears the s
 startup — before the pull, since from then on an in-flight partial and an abandoned one look
 identical.
 
-An interrupted download **resumes** rather than restarting: the partial is kept, and the next
-attempt sends `Range: bytes=<have>-` for the rest. Two things make appending to a prefix safe,
-and both are load-bearing:
+An interrupted **chunked** download resumes rather than restarting: the partial and its chunk
+map are kept, and the next attempt refetches only the ranges the map says are missing. Two
+things make adopting an earlier attempt's bytes safe, and both are load-bearing:
 
-- the partial's name carries the **revision** it was fetched from, so a prefix is never
-  extended by a different revision's bytes — a remote edit mid-download simply starts a new
+- the partial's name carries the **revision** it was fetched from, so its bytes are never
+  extended by a different revision's — a remote edit mid-download simply starts a new
   partial and leaves the old one for the sweep; and
-- the resumed request addresses that same immutable revision as `rev:<rev>`, not the display
+- every request addresses that same immutable revision as `rev:<rev>`, not the display
   path, which would serve whatever is current.
 
-A server that ignores the range answers `200` with the whole body, so the partial is truncated
-rather than appended to. A `416` means the partial is longer than the revision claims and is
-therefore garbage: it is deleted and the download restarts from zero.
+A single-stream download does **not** resume: its progress is only a length, and a length
+cannot be trusted after a crash — ext4 can leave the file at full size with an unsynced,
+zero-filled tail, so appending past it would splice a hole into the middle of the finished
+file. A file small enough for that path is cheap to refetch whole. A `416` means the revision
+will not serve the ranges the plan assumed, so the partial describes a file that does not
+exist: it is discarded and the download starts clean.
 
 `Reconciler::push` then decides, per path, what actually happened:
 

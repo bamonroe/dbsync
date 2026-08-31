@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "verify-dropbox-content-hash-before-renaming-a-download-into-place"
+title = "Verify Dropbox content_hash before renaming a download into place"
+description = "src/api/download.rs:104-112 and the chunked path rename a completed download into place without verifying content_hash; resume trusts a partial purely by length + rev-derived name. The hash algorithm already exists in state/hash.rs — verify before the rename to catch truncation/corruption cheaply. Also closes most of the crash-splice risk in the whole-file resume bug."
+status = "finished"
+level = "task"
+category = "feature"
+created = 2026-08-30
+completed = 2026-08-31
+tags = ["review"]
+
+[[task]]
 id = "stop-re-parsing-the-whole-journal-on-every-save"
 title = "Stop re-parsing the whole journal on every save"
 description = "src/state/db.rs:381 + src/state/journal.rs:134: save() calls journal.record_count(), implemented as replay()?.len() — it JSON-deserializes every journal record on every checkpoint, making saves O(journal length) and quadratic across a big pull. Cache the count and bump it on append (or count newlines)."

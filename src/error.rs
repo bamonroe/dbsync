@@ -44,6 +44,16 @@ pub enum Error {
     #[error("Dropbox API error ({status}): {message}")]
     Api { status: u16, message: String },
 
+    /// The downloaded bytes did not hash to the revision's `content_hash`, so
+    /// the transfer is corrupt and must not be renamed into place. Worth
+    /// retrying: the next attempt starts the download from scratch.
+    #[error("download of {path} hashed to {actual}, expected {expected}")]
+    CorruptDownload {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+
     /// Work handed to the blocking pool never came back — it panicked, or the
     /// runtime is shutting down. See [`crate::blocking`].
     #[error("background work failed: {0}")]

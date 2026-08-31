@@ -262,6 +262,7 @@ mod tests {
                 remote_path: &str,
                 _rev: &str,
                 _allowance: Allowance,
+                _expected_hash: Option<&str>,
                 dest: &Path,
             ) -> Result<()> {
                 match remote_path {

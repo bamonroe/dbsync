@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "verify-dropbox-content-hash-before-renaming-a-download-into-place"
-title = "Verify Dropbox content_hash before renaming a download into place"
-description = "src/api/download.rs:104-112 and the chunked path rename a completed download into place without verifying content_hash; resume trusts a partial purely by length + rev-derived name. The hash algorithm already exists in state/hash.rs — verify before the rename to catch truncation/corruption cheaply. Also closes most of the crash-splice risk in the whole-file resume bug."
-status = "active"
-level = "task"
-category = "feature"
-urgency = "normal"
-order = 150
-created = 2026-08-30
-tags = ["review"]
-
-[[task]]
 id = "avoid-redundant-token-refreshes-after-parallel-401s"
 title = "Avoid redundant token refreshes after parallel 401s"
 description = "src/auth/provider.rs:66-70: force_refresh unconditionally clears the cache, so N parallel downloads that all hit a 401 trigger N serialized token-endpoint calls. Pass in the token that failed and skip the refresh if the cache already holds a newer one."
