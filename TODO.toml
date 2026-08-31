@@ -33,18 +33,6 @@ created = 2026-08-30
 tags = ["review"]
 
 [[task]]
-id = "non-ascii-remote-root-prefix-match-rejects-the-whole-account"
-title = "Non-ASCII remote-root prefix match rejects the whole account"
-description = "src/reconcile/paths.rs:123: strip_root uses eq_ignore_ascii_case; a configured root like /Ärbeit echoed by Dropbox as /ärbeit fails the match and every entry is rejected as outside the mirrored folder. Compare with Unicode-aware lowercasing consistent with key_for."
-status = "active"
-level = "task"
-category = "bug"
-urgency = "normal"
-order = 110
-created = 2026-08-30
-tags = ["review"]
-
-[[task]]
 id = "conflicted-path-has-a-check-then-use-race-and-can-overwrite-an-earlier-conflicted-copy"
 title = "conflicted_path has a check-then-use race and can overwrite an earlier conflicted copy"
 description = "src/reconcile/conflict.rs:49-55: the while candidate.exists() probe followed later by tokio::fs::copy (which truncates) means two near-simultaneous conflicts on the same file — or an incoming download already named like a conflicted copy — can overwrite the earlier copy, the exact bytes the mechanism protects. Create the target with O_EXCL (File::create_new) and retry on collision."

@@ -113,21 +113,37 @@ impl PathMapper {
 
     /// Drop the mirrored-folder prefix, case-insensitively — Dropbox is
     /// case-insensitive, so the display path's case may differ from ours.
+    ///
+    /// The comparison is full Unicode lowercasing, the same rule `key_for`
+    /// keys the state by. ASCII-only folding would reject a root like
+    /// `/Ärbeit` echoed back as `/ärbeit` — and with it every entry in the
+    /// account. The prefix is found by walking char boundaries rather than
+    /// splitting at the root's byte length, since lowercasing can change a
+    /// string's length.
     fn strip_root<'a>(&self, display_path: &'a str) -> Result<&'a str> {
         if self.remote_root.is_empty() {
             return Ok(display_path);
         }
-        let (prefix, rest) = display_path
-            .split_at_checked(self.remote_root.len())
-            .ok_or_else(|| outside_root(display_path))?;
-        if !prefix.eq_ignore_ascii_case(&self.remote_root) {
-            return Err(outside_root(display_path));
+        let root = self.remote_root.to_lowercase();
+        let boundaries = display_path
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(display_path.len()));
+        for end in boundaries {
+            let lowered = display_path[..end].to_lowercase();
+            if lowered == root {
+                let rest = &display_path[end..];
+                // "/Work" must not match "/Workshop/a.txt".
+                return match rest.is_empty() || rest.starts_with('/') {
+                    true => Ok(rest),
+                    false => Err(outside_root(display_path)),
+                };
+            }
+            if lowered.len() >= root.len() {
+                break;
+            }
         }
-        // "/Work" must not match "/Workshop/a.txt".
-        match rest.is_empty() || rest.starts_with('/') {
-            true => Ok(rest),
-            false => Err(outside_root(display_path)),
-        }
+        Err(outside_root(display_path))
     }
 }
 
@@ -248,6 +264,16 @@ mod tests {
     #[test]
     fn the_prefix_match_ignores_case() {
         assert!(mapper("/Work").to_local("/work/a.txt").is_ok());
+    }
+
+    /// Case folding is Unicode, not ASCII: a non-ASCII root echoed back by
+    /// Dropbox in different case must still match, or every entry in the
+    /// account is rejected as outside the mirrored folder.
+    #[test]
+    fn a_non_ascii_prefix_match_ignores_case() {
+        assert!(mapper("/Ärbeit").to_local("/ärbeit/a.txt").is_ok());
+        assert!(mapper("/ärbeit").to_local("/ÄRBEIT/a.txt").is_ok());
+        assert!(mapper("/Ärbeit").to_local("/ärbeiten/a.txt").is_err());
     }
 
     /// A prefix match must respect path boundaries.
