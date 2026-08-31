@@ -220,7 +220,9 @@ Three rules hold the whole thing together:
   `load` replays the journal on top of the snapshot. That makes a save cost what changed
   rather than what is stored — the difference between an O(entries) write per checkpoint and
   an O(changes) one. The snapshot is rewritten only when the journal passes `COMPACT_AFTER`
-  (5,000 records), and the rename lands *before* the journal is cleared: a crash between the
+  (5,000 records) — a length the `Journal` keeps as a cached count, bumped on append and
+  reset on clear, so deciding that on every save does not re-read the journal and put the
+  O(n) straight back. The rename lands *before* the journal is cleared: a crash between the
   two replays records the snapshot already holds, which is harmless because replay is
   idempotent, whereas the other order would lose them. A torn final line — a crash
   mid-append — stops the replay rather than failing the load; the cost is the last few

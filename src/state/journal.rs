@@ -22,6 +22,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -59,9 +61,24 @@ pub enum Record {
     Cursor(Option<String>),
 }
 
+/// Stands in for "the cached count is not known yet" — a real journal can
+/// never hold this many records.
+const UNKNOWN: usize = usize::MAX;
+
 /// The journal file sitting beside a snapshot.
+///
+/// Cloning shares the cached record count, so the clone a save hands to a
+/// blocking thread keeps the counting work the original already did.
+#[derive(Debug, Clone)]
 pub struct Journal {
     path: PathBuf,
+    /// How many records the file holds, or [`UNKNOWN`] before anything has
+    /// looked. Every write goes through this type, so the count can be kept up
+    /// to date instead of recounted: [`Self::record_count`] runs on every save,
+    /// and re-parsing the whole journal there made saving O(journal length) —
+    /// quadratic across a long pull, which is the cost this module exists to
+    /// remove.
+    count: Arc<AtomicUsize>,
 }
 
 impl Journal {
@@ -69,6 +86,7 @@ impl Journal {
     pub fn beside(snapshot_path: &Path) -> Self {
         Self {
             path: snapshot_path.with_extension("journal"),
+            count: Arc::new(AtomicUsize::new(UNKNOWN)),
         }
     }
 
@@ -102,6 +120,11 @@ impl Journal {
             .into_inner()
             .map_err(|e| Error::Config(format!("cannot flush the journal: {e}")))?
             .sync_all()?;
+        self.count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |known| {
+                (known != UNKNOWN).then(|| known + records.len())
+            })
+            .ok();
         Ok(())
     }
 
@@ -109,7 +132,10 @@ impl Journal {
     pub fn replay(&self) -> Result<Vec<Record>> {
         let file = match std::fs::File::open(&self.path) {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.count.store(0, Ordering::Relaxed);
+                return Ok(Vec::new());
+            }
             Err(source) => {
                 return Err(Error::ReadFile {
                     path: self.path.clone(),
@@ -127,19 +153,33 @@ impl Journal {
                 Err(_) => break,
             }
         }
+        self.count.store(records.len(), Ordering::Relaxed);
         Ok(records)
     }
 
     /// How many records the journal currently holds.
+    ///
+    /// Reads the file only the first time; after that the count is kept current
+    /// by the writes themselves. A load replays the journal on the way in, so in
+    /// practice the daemon has already paid for it before the first save.
     pub fn record_count(&self) -> Result<usize> {
-        Ok(self.replay()?.len())
+        match self.count.load(Ordering::Relaxed) {
+            UNKNOWN => Ok(self.replay()?.len()),
+            known => Ok(known),
+        }
     }
 
     /// Drop the journal, which a fresh snapshot has just made redundant.
     pub fn clear(&self) -> Result<()> {
         match std::fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(()) => {
+                self.count.store(0, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.count.store(0, Ordering::Relaxed);
+                Ok(())
+            }
             Err(error) => Err(error.into()),
         }
     }
@@ -230,5 +270,52 @@ mod tests {
 
         assert!(!journal.path().exists());
         assert!(journal.replay().unwrap().is_empty());
+    }
+
+    /// The count a save consults must track appends and clears without going
+    /// back to the file, since re-reading it on every save is what made saving
+    /// cost the whole journal.
+    #[test]
+    fn the_record_count_follows_appends_and_clears_without_re_reading() {
+        let (_dir, journal) = journal();
+        assert_eq!(journal.record_count().unwrap(), 0);
+
+        journal
+            .append(&[Record::Cursor(None), Record::EntryGone("/a.txt".into())])
+            .unwrap();
+        journal.append(&[Record::Cursor(None)]).unwrap();
+        assert_eq!(journal.record_count().unwrap(), 3);
+
+        // With the file gone, only a cached count can still answer 3.
+        std::fs::remove_file(journal.path()).unwrap();
+        assert_eq!(journal.record_count().unwrap(), 3);
+
+        journal.clear().unwrap();
+        assert_eq!(journal.record_count().unwrap(), 0);
+    }
+
+    /// A save moves the db — and so the journal — to a blocking thread and back,
+    /// which must not throw the count away and start recounting.
+    #[test]
+    fn a_clone_shares_the_cached_count() {
+        let (_dir, journal) = journal();
+        assert_eq!(journal.record_count().unwrap(), 0);
+        let clone = journal.clone();
+        clone.append(&[Record::Cursor(None)]).unwrap();
+
+        std::fs::remove_file(journal.path()).unwrap();
+        assert_eq!(journal.record_count().unwrap(), 1);
+    }
+
+    /// Nothing has looked at the file yet, so the first question has to read it.
+    #[test]
+    fn a_journal_left_by_a_previous_run_is_counted_on_first_ask() {
+        let (dir, journal) = journal();
+        journal
+            .append(&[Record::Cursor(None), Record::Cursor(None)])
+            .unwrap();
+
+        let reopened = Journal::beside(&dir.path().join("state.json"));
+        assert_eq!(reopened.record_count().unwrap(), 2);
     }
 }

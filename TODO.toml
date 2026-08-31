@@ -45,18 +45,6 @@ created = 2026-08-30
 tags = ["review"]
 
 [[task]]
-id = "stop-re-parsing-the-whole-journal-on-every-save"
-title = "Stop re-parsing the whole journal on every save"
-description = "src/state/db.rs:381 + src/state/journal.rs:134: save() calls journal.record_count(), implemented as replay()?.len() — it JSON-deserializes every journal record on every checkpoint, making saves O(journal length) and quadratic across a big pull. Cache the count and bump it on append (or count newlines)."
-status = "active"
-level = "task"
-category = "refactor"
-urgency = "high"
-order = 180
-created = 2026-08-30
-tags = ["review", "perf"]
-
-[[task]]
 id = "eliminate-per-chunk-8-mib-copies-on-the-upload-path"
 title = "Eliminate per-chunk 8 MiB copies on the upload path"
 description = "src/api/client.rs:135: content_upload clones the full body (up to 8 MiB per session chunk) just for the rare 401-retry path — use Bytes (cheap clone) or check token freshness first. Also src/api/upload.rs:207: read_chunk zero-fills a fresh 8 MiB Vec per chunk — use with_capacity + take().read_to_end."

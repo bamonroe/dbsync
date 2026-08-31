@@ -302,11 +302,18 @@ impl SyncState {
 #[derive(Debug, Clone)]
 pub struct StateDb {
     path: PathBuf,
+    /// Held rather than rebuilt per call so its cached record count survives
+    /// across saves — and, since cloning shares that count, across the trip to
+    /// and from a blocking thread in [`Self::save_off_thread`].
+    journal: Journal,
 }
 
 impl StateDb {
     pub fn at(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            journal: Journal::beside(&path),
+            path,
+        }
     }
 
     /// The default location: `$XDG_DATA_HOME/dbsync/state.json`, alongside the
@@ -322,8 +329,8 @@ impl StateDb {
     }
 
     /// The journal carrying whatever the snapshot does not yet include.
-    pub fn journal(&self) -> Journal {
-        Journal::beside(&self.path)
+    pub fn journal(&self) -> &Journal {
+        &self.journal
     }
 
     /// Load the snapshot and replay the journal on top of it.
@@ -425,6 +432,9 @@ impl StateDb {
     /// One attempt to get `pending` onto disk, by journal append or compaction.
     fn persist(&self, state: &SyncState, pending: &[Record]) -> Result<()> {
         let journal = self.journal();
+        // A count the journal could not work out at all is treated as empty:
+        // the worst case is compacting later than intended, and the append
+        // below is the cheap path either way.
         let folded = journal.record_count().unwrap_or(0) + pending.len();
         if !self.path.exists() || folded >= COMPACT_AFTER {
             return self.compact(state);

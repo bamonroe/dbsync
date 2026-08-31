@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "stop-re-parsing-the-whole-journal-on-every-save"
+title = "Stop re-parsing the whole journal on every save"
+description = "src/state/db.rs:381 + src/state/journal.rs:134: save() calls journal.record_count(), implemented as replay()?.len() — it JSON-deserializes every journal record on every checkpoint, making saves O(journal length) and quadratic across a big pull. Cache the count and bump it on append (or count newlines)."
+status = "finished"
+level = "task"
+category = "refactor"
+created = 2026-08-30
+completed = 2026-08-31
+tags = ["review", "perf"]
+
+[[task]]
 id = "move-blocking-filesystem-work-off-tokio-runtime-threads"
 title = "Move blocking filesystem work off tokio runtime threads"
 description = "Blocking calls run directly in async contexts: hash_file (src/state/hash.rs:61, full-file SHA-256 with std::fs reads) is called from reconcile/conflict.rs:88,95 and reconcile/local.rs:111; Db::save (src/state/db.rs:417-430) does sync writes plus double fsync from four async call sites in reconcile/mod.rs; sweep (src/reconcile/sweep.rs:28,51) and create_dir_all (daemon/mod.rs:86) walk the tree on the runtime thread. Wrap these in spawn_blocking (or async variants). A multi-GB hash currently stalls a worker for its whole duration."
