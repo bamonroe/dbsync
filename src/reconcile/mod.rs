@@ -901,9 +901,7 @@ mod tests {
 
         std::fs::write(fixture.local("a.txt"), b"a never-uploaded local edit").unwrap();
         fixture.remote().queue_continue(Err(Error::CursorReset));
-        fixture
-            .remote()
-            .queue_listing(page(vec![], "fresh", false));
+        fixture.remote().queue_listing(page(vec![], "fresh", false));
         fixture.applier.pull().await.unwrap();
 
         assert_eq!(
@@ -934,9 +932,7 @@ mod tests {
         std::fs::write(fixture.local("a.txt").join("inner"), b"x").unwrap();
 
         fixture.remote().queue_continue(Err(Error::CursorReset));
-        fixture
-            .remote()
-            .queue_listing(page(vec![], "fresh", false));
+        fixture.remote().queue_listing(page(vec![], "fresh", false));
         fixture.applier.pull().await.unwrap();
 
         assert!(!fixture.local("b.txt").exists(), "b must still be dropped");

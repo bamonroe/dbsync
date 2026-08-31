@@ -45,18 +45,6 @@ created = 2026-08-30
 tags = ["review"]
 
 [[task]]
-id = "honor-retry-after-on-per-file-429s"
-title = "Honor Retry-After on per-file 429s"
-description = "src/state/failures.rs:142 + src/reconcile/page.rs: Error::RateLimited is honored only on the listing loop and long-poll; a 429 on an individual transfer is classified Transient and the page keeps hammering the API immediately. Surface RateLimited from page::apply and pause the page (or whole pull) for the stated delay."
-status = "active"
-level = "task"
-category = "bug"
-urgency = "normal"
-order = 160
-created = 2026-08-30
-tags = ["review"]
-
-[[task]]
 id = "avoid-redundant-token-refreshes-after-parallel-401s"
 title = "Avoid redundant token refreshes after parallel 401s"
 description = "src/auth/provider.rs:66-70: force_refresh unconditionally clears the cache, so N parallel downloads that all hit a 401 trigger N serialized token-endpoint calls. Pass in the token that failed and skip the refresh if the cache already holds a newer one."

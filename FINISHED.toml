@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "honor-retry-after-on-per-file-429s"
+title = "Honor Retry-After on per-file 429s"
+description = "src/state/failures.rs:142 + src/reconcile/page.rs: Error::RateLimited is honored only on the listing loop and long-poll; a 429 on an individual transfer is classified Transient and the page keeps hammering the API immediately. Surface RateLimited from page::apply and pause the page (or whole pull) for the stated delay."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-30
+completed = 2026-08-30
+tags = ["review"]
+
+[[task]]
 id = "new-files-created-under-a-shortened-path-upload-to-the-wrong-remote-path"
 title = "New files created under a shortened path upload to the wrong remote path"
 description = "src/reconcile/local.rs:41-48 + src/reconcile/paths.rs:97-112: aliases are recorded per applied entry only, so a user file created inside a locally-shortened folder (longname~a1b2c3d4/) has no alias and to_remote emits the fingerprint-mangled name, creating a duplicate remote folder tree. Resolve parent-directory aliases when mapping local paths to remote."

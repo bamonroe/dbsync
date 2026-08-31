@@ -92,7 +92,9 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
     async fn apply_serial(&mut self, entries: &[&RemoteEntry], applied: &mut usize) -> Result<()> {
         for entry in entries {
             let outcome = apply::apply_entry(self.source, self.paths, self.state, entry).await;
+            let pause = rate_limit_of(&outcome);
             self.tally(entry, outcome.map(|_| ()), applied)?;
+            obey(pause).await;
         }
         Ok(())
     }
@@ -134,10 +136,15 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
         }
         let fetched = join_all(plans.iter().map(|(_, plan)| self.fetch(plan))).await;
 
+        let mut pause = None;
         for ((entry, plan), outcome) in plans.iter().zip(fetched) {
+            pause = pause.max(rate_limit_of(&outcome));
             let outcome = outcome.and_then(|fetched| apply::record(self.state, plan, fetched));
             self.tally(entry, outcome, applied)?;
         }
+        // Dropbox named a delay; hammering on with the rest of the page would
+        // only earn longer ones.
+        obey(pause).await;
         Ok(())
     }
 
@@ -210,9 +217,97 @@ impl<S: RemoteSource + Sync> Page<'_, S> {
     }
 }
 
+/// The wait Dropbox asked for, if this outcome was a 429.
+fn rate_limit_of<T>(outcome: &Result<T>) -> Option<u64> {
+    match outcome {
+        Err(crate::error::Error::RateLimited(seconds)) => Some(*seconds),
+        _ => None,
+    }
+}
+
+/// Honour a named delay before touching the API again.
+async fn obey(pause: Option<u64>) {
+    if let Some(seconds) = pause {
+        tracing::warn!(seconds, "rate limited mid-page; pausing as asked");
+        tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 429 on one file's transfer must pause the page for the delay Dropbox
+    /// named, instead of hammering straight on with the remaining entries.
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limited_download_pauses_the_page() {
+        use crate::api::{Allowance, RemoteEntry, RemoteFile};
+        use crate::error::Error;
+        use crate::state::{StateDb, SyncState};
+        use std::path::Path;
+
+        struct RateLimitedOnce;
+        impl crate::reconcile::source::RemoteSource for RateLimitedOnce {
+            async fn list_folder(&self, _: &str) -> Result<crate::api::ListFolderPage> {
+                unreachable!()
+            }
+            async fn list_folder_continue(&self, _: &str) -> Result<crate::api::ListFolderPage> {
+                unreachable!()
+            }
+            async fn get_metadata(&self, _: &str) -> Result<RemoteEntry> {
+                unreachable!()
+            }
+            async fn download_to(
+                &self,
+                remote_path: &str,
+                _rev: &str,
+                _allowance: Allowance,
+                dest: &Path,
+            ) -> Result<()> {
+                match remote_path {
+                    "/limited.txt" => Err(Error::RateLimited(7)),
+                    _ => {
+                        tokio::fs::write(dest, b"ok").await?;
+                        Ok(())
+                    }
+                }
+            }
+        }
+
+        fn file(path: &str) -> RemoteEntry {
+            RemoteEntry::File(RemoteFile {
+                path_lower: path.to_lowercase(),
+                path_display: path.to_string(),
+                rev: "r1".to_string(),
+                size: 0,
+                content_hash: None,
+            })
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = SyncState::new();
+        let db = StateDb::at(dir.path().join("state.json"));
+        let admission = crate::reconcile::Admission::default();
+        let mut page = Page {
+            source: &RateLimitedOnce,
+            paths: &PathMapper::new(dir.path(), ""),
+            state: &mut state,
+            db: &db,
+            admission: &admission,
+        };
+
+        let started = tokio::time::Instant::now();
+        let applied = page
+            .apply(&[file("/limited.txt"), file("/fine.txt")])
+            .await
+            .unwrap();
+
+        assert_eq!(applied, 1, "the healthy entry still lands");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(7),
+            "the named delay must be honoured"
+        );
+    }
 
     /// Interim saves land on the interval and nowhere else. The end-to-end
     /// case — killing the process mid-page — cannot be reached from a unit
