@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "fix-cursor-reset-race-that-permanently-stalls-remote-sync"
-title = "Fix cursor-reset race that permanently stalls remote sync"
-description = "src/notify/watch.rs:128-137: after emit(RemoteEvent::CursorReset), the reconciler can finish resync and publish() the fresh cursor before the loop runs self.cursor.mark_unchanged(); that marks the new cursor as seen and cursor.changed().await parks forever. Remote changes stop arriving until restart. Rework the ordering so a publish that lands during the reset window is not swallowed."
-status = "active"
-level = "task"
-category = "bug"
-urgency = "critical"
-order = 10
-created = 2026-08-30
-tags = ["review"]
-
-[[task]]
 id = "re-queue-pending-deltas-when-a-state-save-fails"
 title = "Re-queue pending deltas when a state save fails"
 description = "src/state/db.rs:376: save() does mem::take(&mut state.pending) up front; if the journal append and compaction fallback both fail (disk full, EIO), the taken records are lost, the next save appends only newer deltas, and after restart the state disagrees with reality (re-uploads, spurious conflicts, resurrecting deletes). Put pending back on error."

@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "fix-cursor-reset-race-that-permanently-stalls-remote-sync"
+title = "Fix cursor-reset race that permanently stalls remote sync"
+description = "src/notify/watch.rs:128-137: after emit(RemoteEvent::CursorReset), the reconciler can finish resync and publish() the fresh cursor before the loop runs self.cursor.mark_unchanged(); that marks the new cursor as seen and cursor.changed().await parks forever. Remote changes stop arriving until restart. Rework the ordering so a publish that lands during the reset window is not swallowed."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-30
+completed = 2026-08-30
+tags = ["review"]
+
+[[task]]
 id = "delete-the-stale-state-backup-once-sync-is-healthy"
 title = "Delete the stale state backup once sync is healthy"
 description = "Remove /tmp/dbsync-state-backup-1788055350.json after the sync is confirmed healthy; it was kept in case the deletion-propagation scare recurred."

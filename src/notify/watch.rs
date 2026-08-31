@@ -125,12 +125,16 @@ impl<P: Longpoll> NotifyLoop<P> {
         match error {
             Error::CursorReset => {
                 self.backoff.reset();
+                // Discard the dead cursor *before* telling the reconciler: once
+                // the signal is out, the resync may publish the fresh cursor at
+                // any moment, and marking after that publish would swallow it —
+                // `changed()` below would then park forever.
+                self.cursor.mark_unchanged();
                 if !self.emit(RemoteEvent::CursorReset).await {
                     return Step::Stop;
                 }
                 // Polling the dead cursor again would just fail the same way,
                 // so idle until the reconciler publishes a live one.
-                self.cursor.mark_unchanged();
                 match self.cursor.changed().await {
                     Ok(()) => Step::Again(Duration::ZERO),
                     Err(_) => Step::Stop,
@@ -273,6 +277,24 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(600)).await;
         assert_eq!(poller.cursors(), vec!["stale".to_string()]);
 
+        cursor.publish("fresh");
+        assert_eq!(events.recv().await, Some(RemoteEvent::Changed));
+        assert_eq!(poller.cursors()[1], "fresh");
+    }
+
+    /// A cursor published while the reset signal is still in flight must still
+    /// wake the loop — the reconciler can finish its resync and publish before
+    /// the loop reaches its park, and that publish must not be swallowed.
+    #[tokio::test(start_paused = true)]
+    async fn a_cursor_published_during_the_reset_window_is_not_lost() {
+        let poller =
+            ScriptedPoller::new(vec![Err(Error::CursorReset), Ok(LongpollOutcome::Changed)]);
+        let (loop_, cursor, mut events) = channel(poller.clone(), "stale");
+        tokio::spawn(loop_.run());
+
+        assert_eq!(events.recv().await, Some(RemoteEvent::CursorReset));
+        // Publish immediately — before the loop has necessarily reached its
+        // park. The publish must be seen as a change, not marked already-seen.
         cursor.publish("fresh");
         assert_eq!(events.recv().await, Some(RemoteEvent::Changed));
         assert_eq!(poller.cursors()[1], "fresh");
