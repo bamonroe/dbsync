@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "new-files-created-under-a-shortened-path-upload-to-the-wrong-remote-path"
-title = "New files created under a shortened path upload to the wrong remote path"
-description = "src/reconcile/local.rs:41-48 + src/reconcile/paths.rs:97-112: aliases are recorded per applied entry only, so a user file created inside a locally-shortened folder (longname~a1b2c3d4/) has no alias and to_remote emits the fingerprint-mangled name, creating a duplicate remote folder tree. Resolve parent-directory aliases when mapping local paths to remote."
-status = "active"
-level = "task"
-category = "bug"
-urgency = "normal"
-order = 80
-created = 2026-08-30
-tags = ["review"]
-
-[[task]]
 id = "move-blocking-filesystem-work-off-tokio-runtime-threads"
 title = "Move blocking filesystem work off tokio runtime threads"
 description = "Blocking calls run directly in async contexts: hash_file (src/state/hash.rs:61, full-file SHA-256 with std::fs reads) is called from reconcile/conflict.rs:88,95 and reconcile/local.rs:111; Db::save (src/state/db.rs:417-430) does sync writes plus double fsync from four async call sites in reconcile/mod.rs; sweep (src/reconcile/sweep.rs:28,51) and create_dir_all (daemon/mod.rs:86) walk the tree on the runtime thread. Wrap these in spawn_blocking (or async variants). A multi-GB hash currently stalls a worker for its whole duration."

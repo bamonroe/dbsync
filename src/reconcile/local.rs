@@ -44,7 +44,42 @@ fn remote_path_of(paths: &PathMapper, state: &SyncState, local: &Path) -> Result
     {
         return Ok(alias.to_string());
     }
+    // A file *created* inside a shortened folder has no alias of its own, but
+    // an enclosing folder does: graft the new components onto the nearest
+    // aliased ancestor. Mapping the whole path verbatim instead would upload
+    // under the fingerprint-mangled folder name and mint a duplicate,
+    // wrongly-named remote tree.
+    if let Some(remote) = grafted_onto_ancestor(paths, state, local) {
+        return Ok(remote);
+    }
     paths.to_remote(local)
+}
+
+/// The remote path built from `local`'s nearest aliased ancestor, if any.
+fn grafted_onto_ancestor(paths: &PathMapper, state: &SyncState, local: &Path) -> Option<String> {
+    let mut ancestor = local.parent();
+    while let Some(dir) = ancestor {
+        let relative = paths.relative_key(dir).ok()?;
+        if relative.is_empty() {
+            return None;
+        }
+        if let Some(alias) = state.alias_for(&relative) {
+            let rest = local.strip_prefix(dir).ok()?;
+            let mut remote = alias.to_string();
+            for component in rest.components() {
+                match component {
+                    std::path::Component::Normal(part) => {
+                        remote.push('/');
+                        remote.push_str(&part.to_string_lossy());
+                    }
+                    _ => return None,
+                }
+            }
+            return Some(remote);
+        }
+        ancestor = dir.parent();
+    }
+    None
 }
 
 pub async fn push_path<S: RemoteSink>(
@@ -233,6 +268,32 @@ mod tests {
         assert_eq!(fixture.push("a.txt").await.unwrap(), Pushed::Uploaded);
         assert_eq!(fixture.remote.content("/a.txt").unwrap(), b"hello");
         assert!(fixture.state.get("/a.txt").is_some());
+    }
+
+    /// A file created inside a locally-shortened folder must upload under the
+    /// folder's *real* remote name, grafted from the recorded alias — not
+    /// under the fingerprint-mangled on-disk name.
+    #[tokio::test]
+    async fn a_new_file_in_a_shortened_folder_uploads_to_the_real_remote_path() {
+        let mut fixture = Fixture::new();
+        // The folder arrived from Dropbox with a name too long for disk, so it
+        // lives locally as "long~abc12345" with an alias back to the original.
+        fixture
+            .state
+            .record_alias("long~abc12345", "/A Very Long Folder Name");
+        fixture.write("long~abc12345/new.txt", b"fresh");
+
+        assert_eq!(
+            fixture.push("long~abc12345/new.txt").await.unwrap(),
+            Pushed::Uploaded
+        );
+        assert_eq!(
+            fixture
+                .remote
+                .content("/A Very Long Folder Name/new.txt")
+                .unwrap(),
+            b"fresh"
+        );
     }
 
     /// A new file must not claim a revision it has no right to.
