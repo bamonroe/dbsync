@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "guard-against-local-edits-landing-during-a-download"
+title = "Guard against local edits landing during a download"
+description = "src/reconcile/apply.rs:127,149-167,193: has_local_edit runs in decide(), but a long chunked download then ends with a rename over dest — a user edit in that window is clobbered with no conflicted copy. Also record() hashes the file after the rename, so an edit between rename and record is stamped as the remote rev and never uploaded. Re-check divergence just before the rename, and hash the downloaded temp file (or use the known content hash) rather than the renamed dest."
+status = "finished"
+level = "task"
+category = "bug"
+created = 2026-08-30
+completed = 2026-08-30
+tags = ["review"]
+
+[[task]]
 id = "re-queue-pending-deltas-when-a-state-save-fails"
 title = "Re-queue pending deltas when a state save fails"
 description = "src/state/db.rs:376: save() does mem::take(&mut state.pending) up front; if the journal append and compaction fallback both fail (disk full, EIO), the taken records are lost, the next save appends only newer deltas, and after restart the state disagrees with reality (re-uploads, spurious conflicts, resurrecting deletes). Put pending back on error."

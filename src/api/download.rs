@@ -300,6 +300,27 @@ fn partial_path(dest: &Path, rev: &str) -> std::path::PathBuf {
     dest.with_file_name(name)
 }
 
+/// Where a finished download parks before the applier's final rename.
+///
+/// The applier re-checks for a local edit *after* the transfer and only then
+/// renames this over the real path, so a slow download cannot silently clobber
+/// an edit made while it ran. The name carries the partial suffix so the
+/// watcher ignores it and the startup sweep clears strays, and it is shortened
+/// the same way a partial is so a maximal name still fits.
+pub fn staged_path(dest: &Path) -> std::path::PathBuf {
+    let suffix = format!(".staged{PARTIAL_SUFFIX}");
+    // The download's own partial and chunk map are named off this path, so
+    // leave them room too.
+    let room = MAX_COMPONENT_BYTES.saturating_sub(2 * suffix.len() + 32 + MAP_SUFFIX.len());
+    let base = dest.file_name().unwrap_or_default();
+    let mut name = match base.to_str() {
+        Some(base) => std::ffi::OsString::from(shorten_to(base, room)),
+        None => base.to_os_string(),
+    };
+    name.push(suffix);
+    dest.with_file_name(name)
+}
+
 /// Keep a revision usable as part of a filename.
 ///
 /// Dropbox revisions are hex, but nothing in the API promises that, and a `/`

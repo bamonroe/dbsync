@@ -12,9 +12,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::api::{Allowance, RemoteEntry, RemoteFile};
+use crate::api::{Allowance, RemoteEntry, RemoteFile, staged_path};
 use crate::error::{Error, Result};
-use crate::state::{SyncState, entry_for_local_file, key_for};
+use crate::state::{SyncEntry, SyncState, entry_for_local_file, key_for};
 
 use super::conflict;
 use super::dircase;
@@ -78,6 +78,24 @@ enum Action<'a> {
     Delete { display_path: &'a str },
 }
 
+/// What [`fetch`] hands to [`record`]: the outcome, plus the state entry a
+/// download built the moment its file was renamed into place. Describing the
+/// file right at the rename — rather than later, in `record` — closes most of
+/// the window in which an edit could be stamped as the remote revision.
+pub(crate) struct Fetched {
+    pub(crate) applied: Applied,
+    entry: Option<SyncEntry>,
+}
+
+impl From<Applied> for Fetched {
+    fn from(applied: Applied) -> Self {
+        Self {
+            applied,
+            entry: None,
+        }
+    }
+}
+
 /// Apply one entry from a listing or change stream.
 pub async fn apply_entry<S: RemoteSource>(
     source: &S,
@@ -87,8 +105,9 @@ pub async fn apply_entry<S: RemoteSource>(
 ) -> Result<Applied> {
     let plan = decide(paths, state, entry)?;
     // No admission control on this path: a one-off apply spends the whole file.
-    let applied = fetch(source, &plan, plan.size()).await?;
-    record(state, &plan)?;
+    let fetched = fetch(source, &plan, plan.size()).await?;
+    let applied = fetched.applied;
+    record(state, &plan, fetched)?;
     Ok(applied)
 }
 
@@ -143,13 +162,19 @@ pub(crate) async fn fetch<S: RemoteSource>(
     source: &S,
     plan: &Plan<'_>,
     budgeted: u64,
-) -> Result<Applied> {
+) -> Result<Fetched> {
     match &plan.action {
-        Action::Skip => Ok(Applied::AlreadyCurrent),
+        Action::Skip => Ok(Applied::AlreadyCurrent.into()),
         Action::Download { file, preserve } => {
             if *preserve {
                 conflict::preserve(&plan.local).await?;
             }
+            // Download beside the real path, not onto it: the transfer can take
+            // minutes, and an edit made while it runs must be set aside before
+            // the rename below — landing directly on `plan.local` would clobber
+            // those bytes with no conflicted copy.
+            let staged = staged_path(&plan.local);
+            let before = fingerprint(&plan.local).await;
             source
                 .download_to(
                     &file.path_display,
@@ -158,12 +183,26 @@ pub(crate) async fn fetch<S: RemoteSource>(
                         size: file.size,
                         budgeted,
                     },
-                    &plan.local,
+                    &staged,
                 )
                 .await?;
-            Ok(match *preserve {
-                true => Applied::Conflicted,
-                false => Applied::Downloaded,
+            let after = fingerprint(&plan.local).await;
+            let late_edit = after.is_some() && after != before;
+            if late_edit {
+                conflict::preserve(&plan.local).await?;
+            }
+            tokio::fs::rename(&staged, &plan.local).await?;
+            // Re-describe from disk rather than from the metadata: the hash and
+            // mtime must be the ones a local scan will actually see, or the very
+            // next scan would read this file as a local edit and upload it
+            // straight back.
+            let entry = entry_for_local_file(&plan.local, &file.path_display, &file.rev)?;
+            Ok(Fetched {
+                applied: match *preserve || late_edit {
+                    true => Applied::Conflicted,
+                    false => Applied::Downloaded,
+                },
+                entry: Some(entry),
             })
         }
         Action::Directory { .. } => {
@@ -172,10 +211,17 @@ pub(crate) async fn fetch<S: RemoteSource>(
             }
             recase_existing(&plan.local).await?;
             tokio::fs::create_dir_all(&plan.local).await?;
-            Ok(Applied::Directory)
+            Ok(Applied::Directory.into())
         }
-        Action::Delete { .. } => remove_local(&plan.local).await,
+        Action::Delete { .. } => remove_local(&plan.local).await.map(Fetched::from),
     }
+}
+
+/// The cheap identity of whatever sits at `path` right now, for spotting an
+/// edit that lands while a download is in flight. `None` means nothing there.
+async fn fingerprint(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = tokio::fs::symlink_metadata(path).await.ok()?;
+    Some((meta.len(), meta.modified().ok()?))
 }
 
 /// Phase three: bring the state up to date with what [`fetch`] just did.
@@ -183,14 +229,16 @@ pub(crate) async fn fetch<S: RemoteSource>(
 /// Only reached once the fetch succeeded, so a failed download or a directory
 /// that could not be removed leaves the state alone and the path is re-applied
 /// when the change stream next mentions it.
-pub(crate) fn record(state: &mut SyncState, plan: &Plan<'_>) -> Result<()> {
+pub(crate) fn record(state: &mut SyncState, plan: &Plan<'_>, fetched: Fetched) -> Result<()> {
     match &plan.action {
         Action::Download { file, .. } => {
-            // Re-describe from disk rather than from the metadata: the hash and
-            // mtime must be the ones a local scan will actually see, or the very
-            // next scan would read this file as a local edit and upload it
-            // straight back.
-            let entry = entry_for_local_file(&plan.local, &file.path_display, &file.rev)?;
+            // The entry was built at the rename, inside `fetch`; falling back
+            // to describing the file now covers nothing in practice but keeps
+            // this total.
+            let entry = match fetched.entry {
+                Some(entry) => entry,
+                None => entry_for_local_file(&plan.local, &file.path_display, &file.rev)?,
+            };
             state.insert(entry);
         }
         Action::Delete { display_path } => forget_subtree(state, display_path),
@@ -287,8 +335,63 @@ fn forget_subtree(state: &mut SyncState, display_path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::ListFolderPage;
     use crate::reconcile::testing::FakeRemote;
-    use crate::state::SyncEntry;
+
+    /// A remote that "takes long enough" for a local edit to land mid-transfer:
+    /// it writes the edit to the real path while the download is in flight.
+    struct EditDuringDownload {
+        edit_path: PathBuf,
+    }
+
+    impl RemoteSource for EditDuringDownload {
+        async fn list_folder(&self, _path: &str) -> Result<ListFolderPage> {
+            unreachable!()
+        }
+        async fn list_folder_continue(&self, _cursor: &str) -> Result<ListFolderPage> {
+            unreachable!()
+        }
+        async fn get_metadata(&self, _path: &str) -> Result<RemoteEntry> {
+            unreachable!()
+        }
+        async fn download_to(
+            &self,
+            _remote_path: &str,
+            _rev: &str,
+            _allowance: Allowance,
+            dest: &Path,
+        ) -> Result<()> {
+            tokio::fs::write(&self.edit_path, b"typed while downloading").await?;
+            tokio::fs::write(dest, b"remote bytes").await?;
+            Ok(())
+        }
+    }
+
+    /// The transfer can take minutes; an edit made while it runs must survive
+    /// as a conflicted copy instead of being clobbered by the final rename.
+    #[tokio::test]
+    async fn an_edit_landing_during_a_download_is_kept_as_a_conflicted_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = PathMapper::new(dir.path(), "");
+        let mut state = SyncState::new();
+        let source = EditDuringDownload {
+            edit_path: dir.path().join("a.txt"),
+        };
+
+        let applied = apply_entry(&source, &paths, &mut state, &file("/a.txt", "r1"))
+            .await
+            .unwrap();
+
+        assert_eq!(applied, Applied::Conflicted);
+        assert_eq!(
+            std::fs::read(dir.path().join("a.txt")).unwrap(),
+            b"remote bytes"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("a (conflicted copy).txt")).unwrap(),
+            b"typed while downloading"
+        );
+    }
 
     fn file(path: &str, rev: &str) -> RemoteEntry {
         RemoteEntry::File(RemoteFile {
