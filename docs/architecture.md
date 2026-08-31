@@ -498,6 +498,9 @@ Two safety properties worth keeping:
 - Access tokens are refreshed **five minutes before** their stated expiry, so a token cannot
   expire between the check and the request that uses it. `TokenProvider::force_refresh` exists
   for the 401 case, where a token was revoked ahead of schedule and the cache is untrustworthy.
+  It takes the token that was rejected, so a burst of parallel 401s costs one refresh rather
+  than one per caller: all of them queue on the cache lock, but only the one that still finds
+  its own rejected token there hits the token endpoint, and the rest reuse its result.
 
 ## Sync state
 

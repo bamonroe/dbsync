@@ -17,6 +17,17 @@ finish_work = "Tasks arrive here via `scripts/todo.sh done <id>`; newest first, 
 growth = "This file only grows; nothing is removed from it."
 
 [[task]]
+id = "avoid-redundant-token-refreshes-after-parallel-401s"
+title = "Avoid redundant token refreshes after parallel 401s"
+description = "src/auth/provider.rs:66-70: force_refresh unconditionally clears the cache, so N parallel downloads that all hit a 401 trigger N serialized token-endpoint calls. Pass in the token that failed and skip the refresh if the cache already holds a newer one."
+status = "finished"
+level = "task"
+category = "refactor"
+created = 2026-08-30
+completed = 2026-08-31
+tags = ["review"]
+
+[[task]]
 id = "deduplicate-the-401-refresh-and-retry-block-in-apiclient"
 title = "Deduplicate the 401 refresh-and-retry block in ApiClient"
 description = "src/api/client.rs:64-73, 107-116, 134-141: rpc, content_download_from, and content_upload each hand-roll the same match-Unauthorized-force_refresh-resend block. Extract a generic with_fresh_token helper taking a send closure; the three call sites become one-liners. Pairs well with the upload-body Bytes change."

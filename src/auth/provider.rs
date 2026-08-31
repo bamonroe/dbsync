@@ -26,6 +26,13 @@ impl CachedToken {
     fn is_usable(&self) -> bool {
         Instant::now() < self.usable_until
     }
+
+    /// Whether this cached token is a genuine replacement for `stale`, the
+    /// token a caller just had rejected. It has to be both a different string
+    /// and still inside its window; the rejected token itself is no answer.
+    fn supersedes(&self, stale: &str) -> bool {
+        self.value != stale && self.is_usable()
+    }
 }
 
 /// Hands out access tokens, refreshing them as needed.
@@ -59,12 +66,22 @@ impl TokenProvider {
         Ok(fresh)
     }
 
-    /// Discard the cached token and fetch a new one.
+    /// Discard the token that was just rejected and fetch a new one.
     ///
-    /// Call this after a 401: the token may have been revoked before its stated
-    /// expiry, so the cache cannot be trusted.
-    pub async fn force_refresh(&self) -> Result<String> {
+    /// Call this after a 401, passing the token the server refused: it may have
+    /// been revoked before its stated expiry, so the cache cannot be trusted.
+    ///
+    /// `stale` is what keeps a burst of parallel 401s from each paying for its
+    /// own token-endpoint round trip. Every one of them queues on the lock, but
+    /// only the first finds its own rejected token in the cache; the rest wake
+    /// to a newer one and take it as it stands.
+    pub async fn force_refresh(&self, stale: &str) -> Result<String> {
         let mut cached = self.cached.lock().await;
+        if let Some(token) = cached.as_ref()
+            && token.supersedes(stale)
+        {
+            return Ok(token.value.clone());
+        }
         *cached = None;
         self.fetch(&mut cached).await
     }
@@ -122,5 +139,36 @@ mod tests {
             usable_until: Instant::now() + Duration::from_secs(60),
         };
         assert!(token.is_usable());
+    }
+
+    fn cached(value: &str) -> CachedToken {
+        CachedToken {
+            value: value.into(),
+            usable_until: Instant::now() + Duration::from_secs(60),
+        }
+    }
+
+    /// The second of two parallel 401s finds a token someone else already
+    /// fetched, and must reuse it rather than refresh again.
+    #[test]
+    fn a_newer_cached_token_supersedes_the_rejected_one() {
+        assert!(cached("new").supersedes("old"));
+    }
+
+    /// If the cache still holds the very token the server refused, reusing it
+    /// would just earn a second 401 — that caller has to do the refresh.
+    #[test]
+    fn the_rejected_token_does_not_supersede_itself() {
+        assert!(!cached("old").supersedes("old"));
+    }
+
+    /// A newer token that has aged out is no better than none: refresh.
+    #[test]
+    fn an_expired_replacement_does_not_supersede() {
+        let token = CachedToken {
+            value: "new".into(),
+            usable_until: Instant::now() - Duration::from_secs(1),
+        };
+        assert!(!token.supersedes("old"));
     }
 }

@@ -21,18 +21,6 @@ finish_work = "When a task is fully finished (built, tested, documented), run `s
 scope = "In bounds: a Linux Dropbox sync daemon driven by the long-poll notification endpoint. Out of bounds: webhooks or any publicly reachable server component, a GUI, and providers other than Dropbox."
 
 [[task]]
-id = "avoid-redundant-token-refreshes-after-parallel-401s"
-title = "Avoid redundant token refreshes after parallel 401s"
-description = "src/auth/provider.rs:66-70: force_refresh unconditionally clears the cache, so N parallel downloads that all hit a 401 trigger N serialized token-endpoint calls. Pass in the token that failed and skip the refresh if the cache already holds a newer one."
-status = "active"
-level = "task"
-category = "refactor"
-urgency = "low"
-order = 170
-created = 2026-08-30
-tags = ["review"]
-
-[[task]]
 id = "small-state-hash-perf-cleanups"
 title = "Small state/hash perf cleanups"
 description = "Three small wins: (1) src/state/hash.rs:38-48 — ContentHasher::update copies every 4 MiB block into pending before hashing; hash aligned full blocks directly to skip a full memcpy pass over all hashed bytes. (2) src/reconcile/apply.rs:275-282 — forget_subtree scans all entries with a to_lowercase alloc each even though the BTreeMap keys are already lowercased; use range() on the sorted keys. (3) src/state/db.rs:431 — snapshots use to_string_pretty, roughly doubling compaction write size; use to_string. Optionally also reuse an open handle/buffer in chunkmap.rs:180-190 mark()."

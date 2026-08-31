@@ -73,8 +73,9 @@ impl ApiClient {
         Send: FnMut(String) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
-        match send(self.tokens.access_token().await?).await {
-            Err(Error::Unauthorized) => send(self.tokens.force_refresh().await?).await,
+        let token = self.tokens.access_token().await?;
+        match send(token.clone()).await {
+            Err(Error::Unauthorized) => send(self.tokens.force_refresh(&token).await?).await,
             other => other,
         }
     }
